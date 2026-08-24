@@ -30,45 +30,25 @@ def uv_loop_create_wrapper() -> C_uv_loop:
 def uv_loop_destroy_wrapper(loop: C_uv_loop) -> None:
     external_call["uv_loop_destroy_wrapper", NoneType, C_uv_loop](loop)
 
-def uv_tcp_init_wrapper(
-    loop: C_uv_loop,
-    tcp: C_uv_tcp
-) -> None:
+def uv_tcp_init_wrapper(loop: C_uv_loop, tcp: C_uv_tcp) -> None:
     external_call["uv_tcp_init_wrapper", NoneType, C_uv_loop, C_uv_tcp](loop, tcp)
 
-def uv_tcp_bind_wrapper(
-    tcp: C_uv_tcp,
-    ip: C_UInt8,
-    port: Int32
-) -> None:
+def uv_tcp_bind_wrapper(tcp: C_uv_tcp, ip: C_UInt8, port: Int32) -> None:
     external_call["uv_tcp_bind_wrapper", NoneType, C_uv_tcp, C_UInt8, Int32](tcp, ip, port)
 
-def uv_listen_wrapper(
-    tcp: C_uv_tcp,
-    backlog: Int32
-) -> None:
+def uv_listen_wrapper(tcp: C_uv_tcp, backlog: Int32) -> None:
     external_call["uv_listen_wrapper", NoneType, C_uv_tcp, Int32](tcp, backlog)
 
-def uv_run_wrapper(
-    loop: C_uv_loop
-) -> None:
+def uv_run_wrapper(loop: C_uv_loop) -> None:
     external_call["uv_run_wrapper", NoneType, C_uv_loop](loop)
 
-def uv_read_start_wrapper(
-    client: C_uv_tcp
-) -> None:
+def uv_read_start_wrapper(client: C_uv_tcp) -> None:
     external_call["uv_read_start_wrapper", NoneType, C_uv_tcp](client)
 
-def uv_write_wrapper(
-    client: C_uv_tcp,
-    data: C_UInt8,
-    len: UInt64
-) -> None:
+def uv_write_wrapper(client: C_uv_tcp, data: C_UInt8, len: UInt64) -> None:
     external_call["uv_write_wrapper", NoneType, C_uv_tcp, C_UInt8, UInt64](client, data, len)
 
-def uv_close_wrapper(
-    client: C_uv_tcp
-) -> None:
+def uv_close_wrapper(client: C_uv_tcp) -> None:
     external_call["uv_close_wrapper", NoneType, C_uv_tcp](client)
 
 def mojelly_set_router(router: C_void) -> None:
@@ -77,53 +57,31 @@ def mojelly_set_router(router: C_void) -> None:
 def http_parser_create() -> C_http_parser:
     return external_call["http_parser_create", C_http_parser]()
 
-def http_parse(
-    parser: C_http_parser,
-    data: C_UInt8,
-    len: UInt64
-) -> Int32:
+def http_parse(parser: C_http_parser, data: C_UInt8, len: UInt64) -> Int32:
     return external_call["http_parse", Int32, C_http_parser, C_UInt8, UInt64](parser, data, len)
 
-def http_get_url(
-    parser: C_http_parser
-) -> C_UInt8:
+def http_get_url(parser: C_http_parser) -> C_UInt8:
     return external_call["http_get_url", C_UInt8, C_http_parser](parser)
 
-def http_get_method(
-    parser: C_http_parser
-) -> C_UInt8:
+def http_get_method(parser: C_http_parser) -> C_UInt8:
     return external_call["http_get_method", C_UInt8, C_http_parser](parser)
 
-def http_get_body(
-    parser: C_http_parser
-) -> C_UInt8:
+def http_get_body(parser: C_http_parser) -> C_UInt8:
     return external_call["http_get_body", C_UInt8, C_http_parser](parser)
 
-def http_get_body_len(
-    parser: C_http_parser
-) -> UInt64:
+def http_get_body_len(parser: C_http_parser) -> UInt64:
     return external_call["http_get_body_len", UInt64, C_http_parser](parser)
 
-def http_is_complete(
-    parser: C_http_parser
-) -> Int32:
+def http_is_complete(parser: C_http_parser) -> Int32:
     return external_call["http_is_complete", Int32, C_http_parser](parser)
 
-def http_parser_free(
-    parser: C_http_parser
-) -> None:
+def http_parser_free(parser: C_http_parser) -> None:
     external_call["http_parser_free", NoneType, C_http_parser](parser)
 
-def send_http_response(
-    client: C_uv_tcp,
-    status: Int32,
-    body: C_UInt8
-) -> None:
+def send_http_response(client: C_uv_tcp, status: Int32, body: C_UInt8) -> None:
     external_call["send_http_response", NoneType, C_uv_tcp, Int32, C_UInt8](client, status, body)
 
-def c_string_to_string(
-    ptr: C_UInt8
-) -> String:
+def c_string_to_string(ptr: C_UInt8) -> String:
     var result = String()
     var i = 0
     while True:
@@ -134,9 +92,7 @@ def c_string_to_string(
         i += 1
     return result
 
-def string_to_c_string(
-    s: String
-) -> C_UInt8:
+def string_to_c_string(s: String) -> C_UInt8:
     var bytes = s.as_bytes()
     var len = len(bytes)
     var layout = Layout[UInt8](count=len + 1)
@@ -154,13 +110,9 @@ def mojo_handler(
     method_ptr: C_UInt8,
     body_ptr: C_UInt8
 ) abi("C") -> C_UInt8:
-    print("[Mojo] mojo_handler called")
-
     var url = c_string_to_string(url_ptr)
     var method = c_string_to_string(method_ptr)
     var body = c_string_to_string(body_ptr)
-
-    print("[Mojo] Request:", method, url)
 
     var request = HTTPRequest()
     request.url = url
@@ -182,32 +134,6 @@ def mojo_handler(
 
     return string_to_c_string(http_response)
 
-struct HTTPParser:
-    var parser: C_http_parser
-
-    def __init__(out self):
-        self.parser = http_parser_create()
-
-    def parse(
-        mut self,
-        data: C_UInt8,
-        len: UInt64
-    ) -> Bool:
-        return http_parse(self.parser, data, len) == 0
-
-    def get_request(self) -> HTTPRequest:
-        var request = HTTPRequest()
-        request.url = c_string_to_string(http_get_url(self.parser))
-        request.method = c_string_to_string(http_get_method(self.parser))
-        request.body = c_string_to_string(http_get_body(self.parser))
-        return request^
-
-    def is_complete(self) -> Bool:
-        return http_is_complete(self.parser) != 0
-
-    def __deinit__(deinit self):
-        http_parser_free(self.parser)
-
 struct HTTPServer:
     var loop: C_uv_loop
     var server: C_uv_tcp
@@ -223,9 +149,12 @@ struct HTTPServer:
         uv_tcp_init_wrapper(self.loop, self.server)
 
         self.router = router^
+        router = RouterHandlers()
 
-        var router_ptr = Pointer[RouterHandlers, MutUntrackedOrigin](self.router.unsafe_ptr()) # <--- here i have problem
-        mojelly_set_router(router_ptr)
+        var router_ptr = Pointer(to=self.router).as_unsafe_any_origin()
+        var router_ptr_void = router_ptr.unsafe_bitcast[NoneType]()
+        var router_ptr_void_fixed = router_ptr_void.unsafe_origin_cast[MutUntrackedOrigin]()
+        mojelly_set_router(router_ptr_void_fixed)
 
         self.is_running = False
 
@@ -238,7 +167,6 @@ struct HTTPServer:
         uv_tcp_bind_wrapper(self.server, ip_cstr, port)
         uv_listen_wrapper(self.server, 128)
         self.is_running = True
-        print("🚀 Mojelly server on http://" + host + ":" + String(port))
 
     def run(self):
         if self.is_running:
