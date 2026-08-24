@@ -1,0 +1,4 @@
+[package]
+name = "mojelly"
+version = "0.1.0"
+description = "🍇 Web framework for Mojo"
