@@ -1,10 +1,32 @@
-// src_c/bridge.c — ядро Mojelly
-
 #include <uv.h>
 #include <llhttp.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <time.h>
+
+#define CONSOLE_LOG 1
+#define LOG_COLORS 1
+
+#if LOG_COLORS
+#define COLOR_RESET   "\033[0m"
+#define COLOR_GREEN   "\033[32m"
+#define COLOR_YELLOW  "\033[33m"
+#define COLOR_BLUE    "\033[34m"
+#define COLOR_MAGENTA "\033[35m"
+#define COLOR_CYAN    "\033[36m"
+#define COLOR_RED     "\033[31m"
+#define COLOR_BOLD    "\033[1m"
+#else
+#define COLOR_RESET   ""
+#define COLOR_GREEN   ""
+#define COLOR_YELLOW  ""
+#define COLOR_BLUE    ""
+#define COLOR_MAGENTA ""
+#define COLOR_CYAN    ""
+#define COLOR_RED     ""
+#define COLOR_BOLD    ""
+#endif
 
 extern char* mojo_handler(void* router, const char* url, const char* method, const char* body);
 
@@ -12,7 +34,8 @@ static void* global_router = NULL;
 
 void mojelly_set_router(void* router) {
     global_router = router;
-    printf("[C] Router set to %p\n", router);
+    if (CONSOLE_LOG)
+        printf("[C] Router set to %p\n", router);
 }
 
 typedef struct {
@@ -31,6 +54,41 @@ typedef struct {
     int headers_complete;
     int status_code;
 } http_parser_t;
+
+static const char* get_method_color(const char* method) {
+    if (strcmp(method, "GET") == 0) return COLOR_CYAN;
+    if (strcmp(method, "POST") == 0) return COLOR_GREEN;
+    if (strcmp(method, "PUT") == 0) return COLOR_YELLOW;
+    if (strcmp(method, "DELETE") == 0) return COLOR_RED;
+    if (strcmp(method, "PATCH") == 0) return COLOR_MAGENTA;
+    return COLOR_BLUE;
+}
+
+static const char* get_status_color(int status) {
+    if (status >= 200 && status < 300) return COLOR_GREEN;
+    if (status >= 300 && status < 400) return COLOR_CYAN;
+    if (status >= 400 && status < 500) return COLOR_YELLOW;
+    if (status >= 500) return COLOR_RED;
+    return COLOR_RESET;
+}
+
+static void log_request(const char* method, const char* url, int status, double duration_ms) {
+    if (!CONSOLE_LOG) return;
+
+    const char* method_color = get_method_color(method);
+    const char* status_color = get_status_color(status);
+
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    char time_str[20];
+    strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
+
+    printf("[%s] ", time_str);
+    printf("%s%s%s ", method_color, method, COLOR_RESET);
+    printf("%s%s%s ", COLOR_BOLD, url, COLOR_RESET);
+    printf("%s%d%s ", status_color, status, COLOR_RESET);
+    printf("%.2fms\n", duration_ms);
+}
 
 static void alloc_buffer_c(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf) {
     buf->base = (char*)malloc(suggested_size);
@@ -89,6 +147,9 @@ static int on_headers_complete_c(llhttp_t* parser) {
 }
 
 static void handle_request(uv_tcp_t* client, const char* data, size_t len) {
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
     http_parser_t* http = (http_parser_t*)malloc(sizeof(http_parser_t));
     memset(http, 0, sizeof(http_parser_t));
 
@@ -100,16 +161,30 @@ static void handle_request(uv_tcp_t* client, const char* data, size_t len) {
     llhttp_init(&http->parser, HTTP_REQUEST, &http->settings);
     http->parser.data = http;
     llhttp_execute(&http->parser, data, len);
+
+    const char* method = llhttp_method_name(http->parser.method);
+    const char* url = http->url ? http->url : "";
+    const char* body = http->body ? http->body : "";
+
     char* response = mojo_handler(
         global_router,
-        http->url ? http->url : "",
-        llhttp_method_name(http->parser.method),
-                                  http->body ? http->body : ""
+        url,
+        method,
+        body
     );
 
     send_response(client, response ? response : "HTTP/1.1 500 Internal Server Error\r\n\r\n");
 
-    //if (response != NULL) free(response);
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    double duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
+    (end.tv_nsec - start.tv_nsec) / 1000000.0;
+
+    int status = http->status_code != 0 ? http->status_code : 200;
+    if (status == 0) status = 200;
+    log_request(method, url, status, duration_ms);
+
+    // if (response != NULL) free(response);
+
     if (http->url != NULL) free(http->url);
     if (http->body != NULL) free(http->body);
     free(http);
@@ -127,7 +202,8 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
 }
 
 static void on_connection_c(uv_stream_t* server, int status) {
-    printf("[C] on_connection_c: server=%p, status=%d\n", (void*)server, status);
+    if (CONSOLE_LOG)
+        printf("[C] on_connection_c: server=%p, status=%d\n", (void*)server, status);
     uv_tcp_t* client = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
     uv_tcp_init(server->loop, client);
     if (uv_accept(server, (uv_stream_t*)client) == 0) {
@@ -154,12 +230,15 @@ void uv_listen_wrapper(uv_tcp_t* tcp, int backlog) {
 
 void uv_run_wrapper(uv_loop_t* loop) {
     if (loop == NULL) {
-        printf("[C] ERROR: loop is NULL!\n");
+        if (CONSOLE_LOG)
+            printf("[C] ERROR: loop is NULL!\n");
         return;
     }
-    printf("[C] uv_run_wrapper: loop=%p starting...\n", (void*)loop);
+    if (CONSOLE_LOG)
+        printf("[C] uv_run_wrapper: loop=%p starting...\n", (void*)loop);
     int result = uv_run(loop, UV_RUN_DEFAULT);
-    printf("[C] uv_run finished with result: %d\n", result);
+    if (CONSOLE_LOG)
+        printf("[C] uv_run finished with result: %d\n", result);
 }
 
 void uv_read_start_wrapper(uv_tcp_t* client) {
@@ -186,21 +265,25 @@ void uv_close_wrapper(uv_tcp_t* client) {
 uv_loop_t* uv_loop_create_wrapper() {
     uv_loop_t* loop = (uv_loop_t*)malloc(sizeof(uv_loop_t));
     if (loop == NULL) {
-        printf("[C] ERROR: malloc failed for loop\n");
+        if (CONSOLE_LOG)
+            printf("[C] ERROR: malloc failed for loop\n");
         return NULL;
     }
     int ret = uv_loop_init(loop);
-    printf("[C] uv_loop_create_wrapper: loop=%p, init_ret=%d\n", (void*)loop, ret);
+    if (CONSOLE_LOG)
+        printf("[C] uv_loop_create_wrapper: loop=%p, init_ret=%d\n", (void*)loop, ret);
     return loop;
 }
 
 void uv_loop_destroy_wrapper(uv_loop_t* loop) {
     if (loop == NULL) return;
-    printf("[C] uv_loop_destroy_wrapper: loop=%p\n", (void*)loop);
+    if (CONSOLE_LOG)
+        printf("[C] uv_loop_destroy_wrapper: loop=%p\n", (void*)loop);
     if (uv_loop_alive(loop)) {
         uv_loop_close(loop);
     } else {
-        printf("[C] loop not alive, skipping close\n");
+        if (CONSOLE_LOG)
+            printf("[C] loop not alive, skipping close\n");
     }
     free(loop);
 }

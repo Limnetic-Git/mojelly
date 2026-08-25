@@ -1,22 +1,56 @@
 #!/bin/bash
-# build.sh — Финальная сборка
 
 set -e
 
-echo "🔨 Building C core..."
+echo "🔍 Checking C core..."
 
-cd src_c
-gcc -c bridge.c -o bridge.o -I/usr/include -I/usr/include/llhttp -fPIC
-gcc -c bridge_ssl.c -o bridge_ssl.o -I/usr/include -I/usr/include/openssl -fPIC
-ar rcs ../lib/libmojelly.a bridge.o bridge_ssl.o
-rm -f bridge.o bridge_ssl.o
-cd ..
+mkdir -p lib
 
-echo "✅ libmojelly.a rebuilt!"
+NEED_REBUILD=false
+
+if [ ! -f "lib/libmojelly.a" ]; then
+    echo "📦 libmojelly.a not found, building..."
+    NEED_REBUILD=true
+else
+    for src in src_c/*.c; do
+        if [ -f "$src" ] && [ "$src" -nt "lib/libmojelly.a" ]; then
+            echo "📦 $src changed, rebuilding..."
+            NEED_REBUILD=true
+            break
+        fi
+    done
+fi
+if [ "$NEED_REBUILD" = true ]; then
+    echo "🔨 Building C core..."
+
+    cd src_c
+    gcc -c bridge.c -o bridge.o -I/usr/include -I/usr/include/llhttp -fPIC
+    gcc -c bridge_ssl.c -o bridge_ssl.o -I/usr/include -I/usr/include/openssl -fPIC
+    ar rcs ../lib/libmojelly.a bridge.o bridge_ssl.o
+    rm -f bridge.o bridge_ssl.o
+    cd ..
+
+    echo "✅ libmojelly.a rebuilt!"
+else
+    echo "✅ libmojelly.a is up to date"
+fi
+
+ls -la lib/libmojelly.a 2>/dev/null || echo "⚠️  libmojelly.a not found!"
 
 echo ""
-echo "📦 Building Mojo server..."
-mojo build -I. examples/http_server.mojo -o server \
+echo "📢 Calling for server-code generator..."
+mkdir -p build
+mojo run generator.mojo
+
+echo ""
+echo "📦 Building server..."
+
+if [ ! -f "build/app_generated.mojo" ]; then
+    echo "❌ build/app_generated.mojo not found! Run generator first."
+    exit 1
+fi
+
+mojo build -I. build/app_generated.mojo -o server \
     -Xlinker -L./lib \
     -Xlinker -lmojelly \
     -Xlinker -luv \
