@@ -71,6 +71,6 @@ mojo build -I. build/app_generated.mojo -O3 -o server \
     -Xlinker -lssl \
     -Xlinker -lcrypto \
     -Xlinker -lpthread \
-    -Xlinker -ldl
+    -Xlinker -ldl \
 
 echo "✅ Server built! Run ./server"
