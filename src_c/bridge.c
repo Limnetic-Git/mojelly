@@ -12,16 +12,16 @@
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
-#include <errno.h> // wip
 
-#define LOG_LEVEL 1
+#define LOG_LEVEL 0
 //0 - Errors only (recommended for best performance)
 //1 - Requests logs (recommended for default use)
 //2 - All logs (use for debug only)
 
-#define LOG_COLORS 1
+#define LOG_COLORS 0
 // 0 - u are boring, but little bit faster
 // 1 - u are cool =)
+
 
 static void on_close_c(uv_handle_t* handle);
 
@@ -46,20 +46,12 @@ static void on_close_c(uv_handle_t* handle);
 #endif
 
 #if LOG_LEVEL >= 0
-#define LOG_ERROR(fmt, ...)   fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...)
+#define LOG_REQUEST(fmt, ...)
+#define LOG_DEBUG(fmt, ...)
 #else
 #define LOG_ERROR(fmt, ...)
-#endif
-
-#if LOG_LEVEL >= 1
-#define LOG_REQUEST(fmt, ...) printf("[REQ] " fmt "\n", ##__VA_ARGS__)
-#else
 #define LOG_REQUEST(fmt, ...)
-#endif
-
-#if LOG_LEVEL >= 2
-#define LOG_DEBUG(fmt, ...)   printf("[DBG] " fmt "\n", ##__VA_ARGS__)
-#else
 #define LOG_DEBUG(fmt, ...)
 #endif
 
@@ -147,29 +139,50 @@ static void on_close_c(uv_handle_t* handle) {
     free(handle);
 }
 
-static void on_write_c(uv_write_t* req, int status) {
+static void on_write_close_c(uv_write_t* req, int status) {
     write_req_t* wr = (write_req_t*)req;
     if (wr->data != NULL) free(wr->data);
     if (wr->client != NULL) uv_close((uv_handle_t*)wr->client, on_close_c);
     free(wr);
 }
 
-static inline void send_response(uv_tcp_t* client, const char* response) {
+static void on_write_keep_alive_c(uv_write_t* req, int status) {
+    write_req_t* wr = (write_req_t*)req;
+    if (wr->data != NULL) free(wr->data);
+    if (status != 0 && wr->client != NULL) {
+        uv_close((uv_handle_t*)wr->client, on_close_c);
+    }
+    free(wr);
+}
+
+static inline void send_response(uv_tcp_t* client, const char* response, int keep_alive) {
     if (response == NULL) response = http_500;
 
     size_t len = strlen(response);
     write_req_t* wr = (write_req_t*)malloc(sizeof(write_req_t));
-    if (!wr) { uv_close((uv_handle_t*)client, on_close_c); return; }
+    if (!wr) {
+        uv_close((uv_handle_t*)client, on_close_c);
+        return;
+    }
 
     wr->data = (char*)malloc(len + 1);
-    if (!wr->data) { free(wr); uv_close((uv_handle_t*)client, on_close_c); return; }
+    if (!wr->data) {
+        free(wr);
+        uv_close((uv_handle_t*)client, on_close_c);
+        return;
+    }
 
     memcpy(wr->data, response, len + 1);
     wr->len = len;
     wr->client = client;
 
     uv_buf_t buf = uv_buf_init(wr->data, len);
-    uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_c);
+
+    if (keep_alive) {
+        uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_keep_alive_c);
+    } else {
+        uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_close_c);
+    }
 }
 
 static int extract_status_from_response(const char* response) {
@@ -181,7 +194,6 @@ static int extract_status_from_response(const char* response) {
         status = status * 10 + (response[i] - '0');
         i++;
     }
-
     return status > 0 ? status : 200;
 }
 
@@ -215,14 +227,17 @@ static int on_headers_complete_c(llhttp_t* parser) {
 
 static inline void handle_request(uv_tcp_t* client, const char* data, size_t len) {
     if (global_router == NULL) {
-        send_response(client, http_500);
+        send_response(client, http_500, 0);
         return;
     }
 
     request_count++;
 
     http_parser_t* http = (http_parser_t*)malloc(sizeof(http_parser_t));
-    if (!http) { send_response(client, http_500); return; }
+    if (!http) {
+        send_response(client, http_500, 0);
+        return;
+    }
     memset(http, 0, sizeof(http_parser_t));
 
     llhttp_settings_init(&http->settings);
@@ -253,7 +268,7 @@ static inline void handle_request(uv_tcp_t* client, const char* data, size_t len
         status = extract_status_from_response(response);
     }
 
-    send_response(client, response ? response : http_500);
+    send_response(client, response ? response : http_500, 1);
 
     if (response != NULL) free(response);
 
@@ -276,8 +291,12 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
 static void on_connection_c(uv_stream_t* server, int status) {
     uv_tcp_t* client = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
     if (!client) return;
-
     uv_tcp_init(server->loop, client);
+    int fd;
+    uv_fileno((uv_handle_t*)client, &fd);
+    int nodelay = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
+
     if (uv_accept(server, (uv_stream_t*)client) == 0) {
         uv_read_start((uv_stream_t*)client, alloc_buffer_c, on_read_c);
     } else {
@@ -289,7 +308,6 @@ static void on_connection_c(uv_stream_t* server, int status) {
 static int create_server_socket(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
-        perror("socket");
         return -1;
     }
 
@@ -306,13 +324,11 @@ static int create_server_socket(int port) {
     addr.sin_port = htons(port);
 
     if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("bind");
         close(fd);
         return -1;
     }
 
-    if (listen(fd, 1024) < 0) {
-        perror("listen");
+    if (listen(fd, 4096) < 0) {
         close(fd);
         return -1;
     }
@@ -362,8 +378,6 @@ static void* thread_main(void* arg) {
 }
 
 void pthread_create_wrapper(int port, void* router, int num_threads) {
-    LOG_DEBUG("pthread_create_wrapper: port=%d, num_threads=%d", port, num_threads);
-
     for (int i = 0; i < num_threads; i++) {
         pthread_t thread;
         thread_args_t* args = (thread_args_t*)malloc(sizeof(thread_args_t));
@@ -413,14 +427,21 @@ void uv_read_stop_wrapper(uv_tcp_t* client) {
 
 void uv_write_wrapper(uv_tcp_t* client, const char* data, size_t len) {
     write_req_t* wr = (write_req_t*)malloc(sizeof(write_req_t));
-    if (!wr) { uv_close((uv_handle_t*)client, on_close_c); return; }
+    if (!wr) {
+        uv_close((uv_handle_t*)client, on_close_c);
+        return;
+    }
     wr->data = (char*)malloc(len);
-    if (!wr->data) { free(wr); uv_close((uv_handle_t*)client, on_close_c); return; }
+    if (!wr->data) {
+        free(wr);
+        uv_close((uv_handle_t*)client, on_close_c);
+        return;
+    }
     memcpy(wr->data, data, len);
     wr->len = len;
     wr->client = client;
     uv_buf_t buf = uv_buf_init(wr->data, len);
-    uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_c);
+    uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_close_c);
 }
 
 void uv_close_wrapper(uv_tcp_t* client) {
