@@ -25,33 +25,30 @@ simple to use and easy to contribute, that makes it good choice to you to join t
 
 ## Some benchmarks 📊
 
-### JSON response in UPDATE-4 (0.0.4-INDEV) using 4 threads (default): 
+### JSON response in UPDATE-5 (0.0.5-INDEV) using 4 threads (default): 
 ```bash
-❯ wrk -t4 -c100 -d30s http://localhost:8080/api/users 
-Running 30s test @ http://localhost:8080/api/users
+❯ wrk -t4 -c100 -d5s http://localhost:8080/api/users
+Running 5s test @ http://localhost:8080/api/users
   4 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   287.13us  469.79us  23.49ms   96.51%
-    Req/Sec    30.62k     3.10k   40.61k    74.17%
-  3655294 requests in 30.01s, 474.09MB read
-Requests/sec: 121782.80
-Transfer/sec:     15.80MB
-~ 30s
+    Latency   182.15us  323.66us  18.43ms   99.61%
+    Req/Sec   142.25k    14.11k  171.39k    68.50%
+  2830900 requests in 5.01s, 380.67MB read
+Requests/sec: 565182.57
+Transfer/sec:     76.00MB
 ```
 
-### Text response in UPDATE-4 (0.0.4-INDEV) using 4 threads (default):
+### Text response in UPDATE-5 (0.0.5-INDEV) using 4 threads (default):
 ```bash
-❯ wrk -t4 -c100 -d30s http://localhost:8080/
-Running 30s test @ http://localhost:8080/
+❯ wrk -t4 -c100 -d5s http://localhost:8080/
+Running 5s test @ http://localhost:8080/
   4 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   258.60us  412.03us  20.82ms   96.64%
-    Req/Sec    32.71k     4.03k   46.67k    70.25%
-  3905472 requests in 30.01s, 365.01MB read
-Requests/sec: 130151.29
-Transfer/sec:     12.16MB
-
-~ 30s
+    Latency   171.56us   96.79us   6.08ms   92.58%
+    Req/Sec   144.09k    16.87k  220.59k    66.50%
+  2867439 requests in 5.01s, 281.66MB read
+Requests/sec: 572749.87
+Transfer/sec:     56.26MB
 ```
 And i will try to make **MORE RPS** cause I love **BLAZING** 🔥
 
@@ -72,7 +69,7 @@ gcc compiler
 (*Idk why, "jelly" sounds cool and I associate with grapes*)
 
 # How to use it
-Here is syntax of UPDATE-4 (0.0.4-INDEV), which will **100%** change in **1.0.0**,
+Here is syntax of UPDATE-5 (0.0.5-INDEV), which will **100%** change in **1.0.0**,
 so check it out, but don't learn it hardly :)
 
 **⚠️ WARNING: This guide is only for Linux! If u are using other OS - i will write guides for them soon. or not soon.**
