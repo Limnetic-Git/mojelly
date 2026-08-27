@@ -41,16 +41,16 @@ Transfer/sec:     15.80MB
 
 ### Text response in UPDATE-4 (0.0.4-INDEV) using 4 threads (default):
 ```bash
-❯ wrk -t4 -c100 -d30s http://localhost:8080/about
-Running 30s test @ http://localhost:8080/about
+❯ wrk -t4 -c100 -d30s http://localhost:8080/
+Running 30s test @ http://localhost:8080/
   4 threads and 100 connections
-^C  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   251.61us  581.54us  11.31ms   97.00%
-    Req/Sec    38.13k     4.37k   44.39k    78.57%
-  212374 requests in 1.42s, 18.63MB read
-  Non-2xx or 3xx responses: 212374
-Requests/sec: 149944.89
-Transfer/sec:     13.16MB
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   258.60us  412.03us  20.82ms   96.64%
+    Req/Sec    32.71k     4.03k   46.67k    70.25%
+  3905472 requests in 30.01s, 365.01MB read
+Requests/sec: 130151.29
+Transfer/sec:     12.16MB
+
 ~ 30s
 ```
 And i will try to make **MORE RPS** cause I love **BLAZING** 🔥
