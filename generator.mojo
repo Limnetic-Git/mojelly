@@ -1,6 +1,10 @@
-# generator.mojo — Генератор сервера
+#This script is generating final code of your product with Mojelly 🍇
+#Final code is in build directory
 
 from std.os import mkdir
+from std.memory.alloc import alloc, dealloc, Layout
+
+comptime USE_MULTITHREAD: Bool = True # U can turn it off, but its not recommended =)
 
 def read_user_file(path: String) -> Optional[String]:
     try:
@@ -20,10 +24,149 @@ def write_generated_file(path: String, content: String) -> Bool:
         file.close()
         print("✅ Generated:", path)
         return True
-    except e:
-        print("❌ Error writing file:", path)
-        print("   ", e)
+    except:
         return False
+
+def span_to_string(span: StringSpan) raises -> String:
+    var result = String()
+    var bytes = span.as_bytes()
+    for i in range(len(bytes)):
+        result += chr(Int(bytes[i]))
+    return result
+
+def bytes_to_string(bytes_arr: Span[UInt8, _]) raises -> String:
+    var result = String()
+    for i in range(len(bytes_arr)):
+        var b = bytes_arr[i]
+        result += chr(Int(b))
+    return result
+
+def substring_before(s: String, pos: Int) raises -> String:
+    var result = String()
+    var bytes = s.as_bytes()
+    for i in range(pos):
+        if i < len(bytes):
+            result += chr(Int(bytes[i]))
+    return result
+
+def safe_strip(s: String) raises -> String:
+    var trimmed = s.strip()
+    return span_to_string(trimmed)
+
+def extract_handlers(user_code: String) -> Dict[String, String]:
+    var routes = Dict[String, String]()
+    var lines = user_code.split("\n")
+
+    for line_span in lines:
+        var line = String(line_span)
+        var trimmed = line.strip()
+
+        if trimmed == "":
+            continue
+        if trimmed.startswith("#") or trimmed.startswith("//"):
+            continue
+
+        var method = ""
+        var path = ""
+        var handler = ""
+        var found = False
+
+        var patterns = [
+            ("router.get(", "GET", 11),
+            ("router.post(", "POST", 12),
+            ("router.put(", "PUT", 11),
+            ("router.delete(", "DELETE", 14),
+            ("router.patch(", "PATCH", 12),
+            ("router.add(", "GET", 11)
+        ]
+
+        for pattern, meth, pattern_len in patterns:
+            if pattern in trimmed:
+                method = meth
+                var start = trimmed.find(pattern) + pattern_len
+                var end = trimmed.rfind(")")
+                if start != -1 and end != -1 and start < end:
+                    var args_str = String()
+                    var i = start
+                    while i < end:
+                        args_str += String(trimmed[byte=i])
+                        i += 1
+
+                    var args = args_str.split(",")
+                    if len(args) >= 2:
+                        var path_span = String(args[0]).strip()
+                        var path_bytes = path_span.as_bytes()
+                        var clean_path_bytes = List[UInt8]()
+                        var in_quotes = False
+                        for j in range(len(path_bytes)):
+                            var b = path_bytes[j]
+                            if b == 34:
+                                in_quotes = not in_quotes
+                            elif not in_quotes and (b == 32 or b == 9):
+                                continue
+                            else:
+                                clean_path_bytes.append(b)
+
+                        try:
+                            var clean_span = Span[UInt8](clean_path_bytes)
+                            path = bytes_to_string(clean_span)
+                        except:
+                            path = ""
+
+                        var handler_span = String(args[1]).strip()
+                        var handler_bytes = handler_span.as_bytes()
+                        var clean_handler_bytes = List[UInt8]()
+                        var paren_pos = -1
+                        for j in range(len(handler_bytes)):
+                            var b = handler_bytes[j]
+                            if b == 40:
+                                paren_pos = j
+                                break
+                            if b != 32 and b != 9:
+                                clean_handler_bytes.append(b)
+
+                        if paren_pos == -1:
+                            try:
+                                var clean_span = Span[UInt8](clean_handler_bytes)
+                                handler = bytes_to_string(clean_span)
+                            except:
+                                handler = ""
+                        else:
+                            try:
+                                var temp_str = bytes_to_string(handler_bytes)
+                                handler = substring_before(temp_str, paren_pos)
+                                handler = safe_strip(handler)
+                            except:
+                                handler = ""
+
+                        if path != "" and handler != "":
+                            found = True
+                            break
+                break
+
+        if found and path != "" and handler != "":
+            var key = method + ":" + path
+            routes[key] = handler
+
+    return routes^
+
+def generate_routes_code(routes: Dict[String, String]) -> String:
+    var code = ""
+    var keys = List[String]()
+
+    for key in routes.keys():
+        keys.append(key)
+
+    for i in range(len(keys)):
+        var key = keys[i]
+        var parts = key.split(":")
+        var method = String(parts[0])
+        var path = String(parts[1])
+        var handler = routes.get(key, "")
+        if handler != "":
+            code += '    router_ptr[].add("' + method + '", "' + path + '", ' + handler + ')\n'
+
+    return code
 
 def generate_server(user_file: String) -> Optional[String]:
     var user_code_opt = read_user_file(user_file)
@@ -31,10 +174,56 @@ def generate_server(user_file: String) -> Optional[String]:
         return None
 
     var user_code = user_code_opt.value()
+    var routes = extract_handlers(user_code)
+    var routes_code = generate_routes_code(routes)
+
+    var main_code: String
+    if USE_MULTITHREAD:
+        main_code = """
+def main():
+    print("🍇 Mojelly HTTP Server (Multithreaded)")
+
+    var port: Int32 = 8080
+    var num_threads: Int32 = 4
+
+    var layout = Layout[RouterHandlers].single()
+    var alloc_result = alloc(layout)
+    var router_ptr = alloc_result^.unsafe_leak()
+    router_ptr[] = RouterHandlers()
+
+ROUTES_PLACEHOLDER
+
+    var router_void = router_ptr.unsafe_bitcast[NoneType]()
+    var router_void_fixed = router_void.unsafe_origin_cast[MutUntrackedOrigin]()
+    mojelly_set_router(router_void_fixed)
+
+    pthread_create_wrapper(port, router_void_fixed, num_threads)
+
+    print("✅ All", num_threads, "threads started")
+    print("🚀 Server listening on port", port)
+
+    while True:
+        sleep(1000)
+"""
+    else:
+        main_code = """
+def main():
+    print("🍇 Mojelly HTTP Server (Single-threaded)")
+
+    var port: Int32 = 8080
+    var router = RouterHandlers()
+
+ROUTES_PLACEHOLDER
+
+    var server = HTTPServer(router^)
+    server.listen(port)
+    server.run()
+"""
+
     var template = """
 # ============================================================
 # THIS FILE WAS GENERATED BY MOJELLY 🍇!
-# For cool guys only. Keep calm and code on.
+# For cool guys only 😎
 # ============================================================
 
 from mojelly.http.request import HTTPRequest
@@ -43,6 +232,7 @@ from mojelly.core.router_handlers import RouterHandlers
 from std.memory import Pointer
 from std.memory.alloc import alloc, dealloc, Layout, ThinAllocation
 from std.ffi import external_call
+from std.time import sleep
 
 # ============================================================
 # USER'S CODE
@@ -58,7 +248,6 @@ comptime C_void = Pointer[NoneType, MutUntrackedOrigin]
 comptime C_UInt8 = Pointer[UInt8, MutUntrackedOrigin]
 comptime C_uv_loop = Pointer[uv_loop_t, MutUntrackedOrigin]
 comptime C_uv_tcp = Pointer[uv_tcp_t, MutUntrackedOrigin]
-comptime C_http_parser = Pointer[http_parser_t, MutUntrackedOrigin]
 
 # ============================================================
 # STRUCTURES FOR C
@@ -68,13 +257,6 @@ struct uv_loop_t:
     var _data: Pointer[UInt8, MutUntrackedOrigin]
 
 struct uv_tcp_t:
-    var _data: Pointer[UInt8, MutUntrackedOrigin]
-
-struct uv_buf_t:
-    var base: Pointer[UInt8, MutUntrackedOrigin]
-    var len: UInt64
-
-struct http_parser_t:
     var _data: Pointer[UInt8, MutUntrackedOrigin]
 
 # ============================================================
@@ -111,39 +293,14 @@ def uv_close_wrapper(client: C_uv_tcp) -> None:
 def mojelly_set_router(router: C_void) -> None:
     external_call["mojelly_set_router", NoneType, C_void](router)
 
-# ============================================================
-# HTTP PARSER
-# ============================================================
+def pthread_create_wrapper(port: Int32, router: C_void, num_threads: Int32) -> None:
+    external_call["pthread_create_wrapper", NoneType, Int32, C_void, Int32](port, router, num_threads)
 
-def http_parser_create() -> C_http_parser:
-    return external_call["http_parser_create", C_http_parser]()
-
-def http_parse(parser: C_http_parser, data: C_UInt8, len: UInt64) -> Int32:
-    return external_call["http_parse", Int32, C_http_parser, C_UInt8, UInt64](parser, data, len)
-
-def http_get_url(parser: C_http_parser) -> C_UInt8:
-    return external_call["http_get_url", C_UInt8, C_http_parser](parser)
-
-def http_get_method(parser: C_http_parser) -> C_UInt8:
-    return external_call["http_get_method", C_UInt8, C_http_parser](parser)
-
-def http_get_body(parser: C_http_parser) -> C_UInt8:
-    return external_call["http_get_body", C_UInt8, C_http_parser](parser)
-
-def http_get_body_len(parser: C_http_parser) -> UInt64:
-    return external_call["http_get_body_len", UInt64, C_http_parser](parser)
-
-def http_is_complete(parser: C_http_parser) -> Int32:
-    return external_call["http_is_complete", Int32, C_http_parser](parser)
-
-def http_parser_free(parser: C_http_parser) -> None:
-    external_call["http_parser_free", NoneType, C_http_parser](parser)
-
-def send_http_response(client: C_uv_tcp, status: Int32, body: C_UInt8) -> None:
-    external_call["send_http_response", NoneType, C_uv_tcp, Int32, C_UInt8](client, status, body)
+def mojelly_free_response(ptr: C_UInt8) -> None:
+    external_call["mojelly_free_response", NoneType, C_UInt8](ptr)
 
 # ============================================================
-# UTILS AND OTHER
+# UTILS
 # ============================================================
 
 def c_string_to_string(ptr: C_UInt8) -> String:
@@ -160,9 +317,7 @@ def c_string_to_string(ptr: C_UInt8) -> String:
 def string_to_c_string(s: String) -> C_UInt8:
     var bytes = s.as_bytes()
     var len = len(bytes)
-    var layout = Layout[UInt8](count=len + 1)
-    var allocation = alloc(layout)
-    var ptr = allocation^.unsafe_leak()
+    var ptr = external_call["malloc", C_UInt8, UInt64](UInt64(len + 1))
     for i in range(len):
         ptr.unsafe_offset(i).unsafe_write(bytes[i])
     ptr.unsafe_offset(len).unsafe_write(0)
@@ -174,11 +329,17 @@ def string_to_c_string(s: String) -> C_UInt8:
 
 @export
 def mojo_handler(
-    router_ptr: Pointer[RouterHandlers, MutUntrackedOrigin],
+    router_ptr: Optional[Pointer[RouterHandlers, MutUntrackedOrigin]],
     url_ptr: C_UInt8,
     method_ptr: C_UInt8,
     body_ptr: C_UInt8
 ) abi("C") -> C_UInt8:
+
+    if not router_ptr:
+        var err_response = "HTTP/1.1 500 Internal Server Error\\r\\n\\r\\n"
+        return string_to_c_string(err_response)
+
+    var router = router_ptr.value()
     var url = c_string_to_string(url_ptr)
     var method = c_string_to_string(method_ptr)
     var body = c_string_to_string(body_ptr)
@@ -187,8 +348,7 @@ def mojo_handler(
     request.url = url
     request.method = method
     request.body = body
-
-    var router_response = router_ptr[].handle(request)
+    var router_response = router[].handle(request)
 
     var body_len = router_response.body.byte_length()
     var http_response = String()
@@ -201,7 +361,8 @@ def mojo_handler(
     http_response += "\\r\\n"
     http_response += router_response.body
 
-    return string_to_c_string(http_response)
+    var result = string_to_c_string(http_response)
+    return result
 
 # ============================================================
 # HTTPServer
@@ -246,38 +407,21 @@ struct HTTPServer:
             uv_run_wrapper(self.loop)
 
 # ============================================================
-# MAIN (ALL USER'S CODE)
+# MAIN
 # ============================================================
 
-def main():
-USER_MAIN_CODE
+""" + main_code + """
 """
-    # Извлекаем тело main()
-    var lines = user_code.split("\n")
-    var in_main = False
-    var main_body = ""
 
-    for line in lines:
-        if "def main():" in line:
-            in_main = True
-            continue
-        if in_main:
-            if line.strip() == "":
-                main_body += "\n"
-                continue
-            if line.strip().startswith("def ") or line.strip().startswith("class "):
-                break
-            main_body += "    " + line.lstrip(" ") + "\n"
-
-    # Убираем расширение .mojo и заменяем / на .
-    var user_file_no_ext = user_file.replace(".mojo", "").replace("/", ".")
-    template = template.replace("USER_FILE", user_file_no_ext)
-    template = template.replace("USER_MAIN_CODE", main_body)
+    template = template.replace("USER_FILE", user_file.replace(".mojo", "").replace("/", "."))
+    template = template.replace("ROUTES_PLACEHOLDER", routes_code)
     return Optional[String](template)
 
 
 def main():
+    var mode = "MULTITHREADED" if USE_MULTITHREAD else "SINGLE-THREADED"
     print("🔧 Generating server code...")
+    print("   Mode:", mode)
 
     var user_file = "examples/my_app.mojo"
     var generated_code_opt = generate_server(user_file)

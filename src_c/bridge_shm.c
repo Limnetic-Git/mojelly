@@ -1,3 +1,8 @@
+
+/*
+I dont use it now, its deprecated
+*/
+
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>

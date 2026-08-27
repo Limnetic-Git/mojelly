@@ -20,14 +20,27 @@ else
         fi
     done
 fi
+
 if [ "$NEED_REBUILD" = true ]; then
     echo "🔨 Building C core..."
 
     cd src_c
-    gcc -c bridge.c -o bridge.o -I/usr/include -I/usr/include/llhttp -fPIC
-    gcc -c bridge_ssl.c -o bridge_ssl.o -I/usr/include -I/usr/include/openssl -fPIC
-    ar rcs ../lib/libmojelly.a bridge.o bridge_ssl.o
-    rm -f bridge.o bridge_ssl.o
+
+    gcc -c bridge.c -o bridge.o \
+        -I/usr/include \
+        -I/usr/include/llhttp \
+        -fPIC -pthread \
+        -O3 -march=native -mtune=native -pipe \
+        -funroll-loops -ffast-math
+
+    gcc -c bridge_ssl.c -O3 -o bridge_ssl.o \
+        -I/usr/include \
+        -I/usr/include/openssl \
+        -fPIC \
+        2>/dev/null || echo "⚠️ bridge_ssl.c not found or failed to compile"
+
+    ar rcs ../lib/libmojelly.a bridge.o bridge_ssl.o 2>/dev/null || ar rcs ../lib/libmojelly.a bridge.o
+    rm -f bridge.o bridge_ssl.o 2>/dev/null
     cd ..
 
     echo "✅ libmojelly.a rebuilt!"
@@ -35,7 +48,7 @@ else
     echo "✅ libmojelly.a is up to date"
 fi
 
-ls -la lib/libmojelly.a 2>/dev/null || echo "⚠️  libmojelly.a not found!"
+ls -la lib/libmojelly.a 2>/dev/null || echo "⚠️ libmojelly.a not found!"
 
 echo ""
 echo "📢 Calling for server-code generator..."
@@ -50,7 +63,7 @@ if [ ! -f "build/app_generated.mojo" ]; then
     exit 1
 fi
 
-mojo build -I. build/app_generated.mojo -o server \
+mojo build -I. build/app_generated.mojo -O3 -o server \
     -Xlinker -L./lib \
     -Xlinker -lmojelly \
     -Xlinker -luv \
