@@ -58,7 +58,7 @@ Mojo language
 C language
 Bash (for `build.sh`)
 llhttp
-libuv
+libuv (soon will be change to io_uring)
 openssl
 pthread
 gcc compiler
@@ -72,7 +72,7 @@ gcc compiler
 Here is syntax of UPDATE-5 (0.0.5-INDEV), which will **100%** change in **1.0.0**,
 so check it out, but don't learn it hardly :)
 
-**⚠️ WARNING: This guide is only for Linux! If u are using other OS - i will write guides for them soon. or not soon.**
+**⚠️ WARNING: FRAMEWORK (as like as Mojo) WORKS ONLY ON LINUX! USE WSL OR LINUX DISTRO**
 
 **Here is `examples/my_app.mojo`**:
 ```mojo
