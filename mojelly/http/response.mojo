@@ -13,5 +13,8 @@ struct HTTPResponse:
     def set_json(mut self):
         self.content_type = "application/json"
 
+    def set_html(mut self):
+        self.content_type = "text/html"
+
     def set_header(mut self, name: String, value: String):
         self.headers[name] = value

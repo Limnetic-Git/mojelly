@@ -1,9 +1,16 @@
 from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
+from test_html_page import test_html_page
 
 def home_handler(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "Home Page 🏠")
+
+def test_handler(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, test_html_page)
+    resp.set_html()
+    print("[DEBUG] Content-Type:", resp.content_type)
+    return resp^
 
 def about_handler(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "About Page 📖")
@@ -24,6 +31,7 @@ def main():
     var router = RouterHandlers()
 
     router.get("/", home_handler)
+    router.get("/test-html", test_handler)
     router.post("/about", about_handler)
     router.get("/api/users", users_handler)
     router.get("/api/hello", hello_handler)

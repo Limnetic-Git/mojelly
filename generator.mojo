@@ -355,7 +355,7 @@ def mojo_handler(
     http_response += "HTTP/1.1 "
     http_response += String(router_response.status)
     http_response += " OK\\r\\n"
-    http_response += "Content-Type: text/plain\\r\\n"
+    http_response += "Content-Type: " + router_response.content_type + "\\r\\n"
     http_response += "Content-Length: " + String(body_len) + "\\r\\n"
     http_response += "Connection: keep-alive\\r\\n"
     http_response += "\\r\\n"
