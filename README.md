@@ -25,7 +25,7 @@ simple to use and easy to contribute, that makes it good choice to you to join t
 
 ## Some benchmarks 📊
 
-### JSON response in UPDATE-5 (0.0.5-INDEV) using 4 threads (default): 
+### JSON response in UPDATE-6 (0.0.6-INDEV) using 4 threads (default): 
 ```bash
 ❯ wrk -t4 -c100 -d5s http://localhost:8080/api/users
 Running 5s test @ http://localhost:8080/api/users
@@ -38,17 +38,17 @@ Requests/sec: 565182.57
 Transfer/sec:     76.00MB
 ```
 
-### Text response in UPDATE-5 (0.0.5-INDEV) using 4 threads (default):
+### Text response in UPDATE-6 (0.0.6-INDEV) using 4 threads (default):
 ```bash
 ❯ wrk -t4 -c100 -d5s http://localhost:8080/
 Running 5s test @ http://localhost:8080/
   4 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   171.56us   96.79us   6.08ms   92.58%
-    Req/Sec   144.09k    16.87k  220.59k    66.50%
-  2867439 requests in 5.01s, 281.66MB read
-Requests/sec: 572749.87
-Transfer/sec:     56.26MB
+    Latency   167.82us   69.22us   3.27ms   87.62%
+    Req/Sec   147.40k    10.39k  183.57k    69.00%
+  2929972 requests in 5.02s, 287.81MB read
+Requests/sec: 584215.00
+Transfer/sec:     57.39MB
 ```
 And i will try to make **MORE RPS** cause I love **BLAZING** 🔥
 
@@ -79,15 +79,21 @@ so check it out, but don't learn it hardly :)
 from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
+from test_html_page import test_html_page
 
 def home_handler(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "Home Page 🏠")
+
+def test_handler(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, test_html_page)
+    resp.set_html()
+    return resp^
 
 def about_handler(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "About Page 📖")
 
 def users_handler(req: HTTPRequest) -> HTTPResponse:
-    var resp = HTTPResponse(200, '[{"id": 1, "name": "Alice"},{"id": 2, "name": "Bob"}]')
+    var resp = HTTPResponse(200, '[{"id":1, "name":"Alice"},{"id":2, "name":"Bob"}]')
     resp.set_json()
     return resp^
 
@@ -102,13 +108,15 @@ def main():
     var router = RouterHandlers()
 
     router.get("/", home_handler)
-    router.post("/about", about_handler) # POST for test
+    router.get("/test-html", test_handler)
+    router.post("/about", about_handler)
     router.get("/api/users", users_handler)
     router.get("/api/hello", hello_handler)
 
     var server = HTTPServer(router)
     server.listen(8080)
     server.run()
+
 ```
 
 After this, run `build.sh` 🛠️:
