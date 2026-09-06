@@ -1,40 +1,42 @@
 from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
-from test_html_page import test_html_page
+from emberjson import try_deserialize, serialize
 
-def home_handler(req: HTTPRequest) -> HTTPResponse:
-    return HTTPResponse(200, "Home Page 🏠")
+@fieldwise_init
+struct CreateUserDTO(Movable, Defaultable):
+    var nickname: String
+    var age: Int
 
-def test_handler(req: HTTPRequest) -> HTTPResponse:
-    var resp = HTTPResponse(200, test_html_page)
-    resp.set_html()
-    print("[DEBUG] Content-Type:", resp.content_type)
-    return resp^
+    def __init__(out self):
+        self.nickname = ""
+        self.age = 0
 
-def about_handler(req: HTTPRequest) -> HTTPResponse:
-    return HTTPResponse(200, "About Page 📖")
+    def default() -> Self:
+        var result = Self()
+        result.nickname = ""
+        self.age = 0
+        return result^
 
-def users_handler(req: HTTPRequest) -> HTTPResponse:
-    var resp = HTTPResponse(200, '[{ "id":1, "name": "Alice"},{"id":2, "name": "Bob"}]')
-    resp.set_json()
-    return resp^
+def create_user_handler(req: HTTPRequest) -> HTTPResponse: #В АРГУМЕНТЕ ДОЛЖНА БУДЕТ БЫТЬ dto: CreateUserDTO ДЛЯ ПАРСИНГА
 
-def hello_handler(req: HTTPRequest) -> HTTPResponse:
-    var resp = HTTPResponse(200, '{"message": "Hello from Mojelly! 🍇"}')
-    resp.set_json()
-    return resp^
+    # ВОТ ЭТО ЧАСТЬ ДОЛЖНА БУДЕТ ГЕНЕРИРОВАТЬСЯ
+    var dto_opt = try_deserialize[CreateUserDTO](req.body)
+    if not dto_opt:
+        return HTTPResponse(400, "Invalid parse JSON to DTO")
+    var dto = dto_opt.take()
+
+
+    print("Age:", dto.age)
+    var adult = (True if dto.age >= 18 else False)
+    print("Adult:", adult)
+    print("Nickname:", dto.nickname)
+
+    return HTTPResponse(200, "OK")
 
 def main():
-    print("🍇 Mojelly HTTP Server")
-
     var router = RouterHandlers()
-
-    router.get("/", home_handler)
-    router.get("/test-html", test_handler)
-    router.post("/about", about_handler)
-    router.get("/api/users", users_handler)
-    router.get("/api/hello", hello_handler)
+    router.post("/users", create_user_handler)
 
     var server = HTTPServer(router)
     server.listen(8080)
