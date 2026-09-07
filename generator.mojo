@@ -53,6 +53,243 @@ def safe_strip(s: String) raises -> String:
     var trimmed = s.strip()
     return span_to_string(trimmed)
 
+def substring_range(s: String, start: Int, end: Int) raises -> String:
+    var result = String()
+    var bytes = s.as_bytes()
+    var i = start
+    while i < end and i < len(bytes):
+        if i >= 0:
+            result += chr(Int(bytes[i]))
+        i += 1
+    return result
+
+def strip_source_comment(line: String) raises -> String:
+    var bytes = line.as_bytes()
+    var quote: UInt8 = 0
+    var escaped = False
+
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if quote != 0:
+            if escaped:
+                escaped = False
+            elif b == 92:
+                escaped = True
+            elif b == quote:
+                quote = 0
+        elif b == 34 or b == 39:
+            quote = b
+        elif b == 35:
+            return substring_range(line, 0, i)
+
+    return line
+
+def parenthesis_balance(s: String) -> Int:
+    var bytes = s.as_bytes()
+    var balance = 0
+    var quote: UInt8 = 0
+    var escaped = False
+
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if quote != 0:
+            if escaped:
+                escaped = False
+            elif b == 92:
+                escaped = True
+            elif b == quote:
+                quote = 0
+        elif b == 34 or b == 39:
+            quote = b
+        elif b == 40:
+            balance += 1
+        elif b == 41:
+            balance -= 1
+
+    return balance
+
+def split_top_level_arguments(arguments: String) raises -> List[String]:
+    var result = List[String]()
+    var current = String()
+    var round_depth = 0
+    var square_depth = 0
+    var curly_depth = 0
+    var quote: UInt8 = 0
+    var escaped = False
+    var bytes = arguments.as_bytes()
+
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if quote != 0:
+            current += chr(Int(b))
+            if escaped:
+                escaped = False
+            elif b == 92:
+                escaped = True
+            elif b == quote:
+                quote = 0
+            continue
+
+        if b == 34 or b == 39:
+            quote = b
+            current += chr(Int(b))
+        elif b == 40:
+            round_depth += 1
+            current += chr(Int(b))
+        elif b == 41:
+            round_depth -= 1
+            current += chr(Int(b))
+        elif b == 91:
+            square_depth += 1
+            current += chr(Int(b))
+        elif b == 93:
+            square_depth -= 1
+            current += chr(Int(b))
+        elif b == 123:
+            curly_depth += 1
+            current += chr(Int(b))
+        elif b == 125:
+            curly_depth -= 1
+            current += chr(Int(b))
+        elif b == 44 and round_depth == 0 and square_depth == 0 and curly_depth == 0:
+            result.append(safe_strip(current))
+            current = String()
+        else:
+            current += chr(Int(b))
+
+    if current != "" or len(result) > 0:
+        result.append(safe_strip(current))
+
+    return result^
+
+def find_top_level_byte(s: String, target: UInt8) -> Int:
+    var bytes = s.as_bytes()
+    var round_depth = 0
+    var square_depth = 0
+    var curly_depth = 0
+    var quote: UInt8 = 0
+    var escaped = False
+
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if quote != 0:
+            if escaped:
+                escaped = False
+            elif b == 92:
+                escaped = True
+            elif b == quote:
+                quote = 0
+            continue
+
+        if b == 34 or b == 39:
+            quote = b
+        elif b == 40:
+            round_depth += 1
+        elif b == 41:
+            round_depth -= 1
+        elif b == 91:
+            square_depth += 1
+        elif b == 93:
+            square_depth -= 1
+        elif b == 123:
+            curly_depth += 1
+        elif b == 125:
+            curly_depth -= 1
+        elif b == target and round_depth == 0 and square_depth == 0 and curly_depth == 0:
+            return i
+
+    return -1
+
+def extract_argument_type(argument: String) raises -> String:
+    var colon = find_top_level_byte(argument, 58)
+    if colon == -1:
+        return ""
+
+    var type_expression = substring_range(
+        argument, colon + 1, len(argument.as_bytes())
+    )
+    var equals = find_top_level_byte(type_expression, 61)
+    if equals != -1:
+        type_expression = substring_range(type_expression, 0, equals)
+
+    return safe_strip(type_expression)
+
+def is_http_request_type(type_name: String) -> Bool:
+    if type_name == "HTTPRequest":
+        return True
+
+    var position = type_name.rfind("HTTPRequest")
+    if position <= 0:
+        return False
+
+    var bytes = type_name.as_bytes()
+    return position + 11 == len(bytes) and bytes[position - 1] == 46
+
+def extract_handler_dtos(user_code: String) raises -> Dict[String, String]:
+    var handler_dtos = Dict[String, String]()
+    var lines = user_code.split("\n")
+    var signature = String()
+    var collecting = False
+    var balance = 0
+
+    for line_span in lines:
+        var line = strip_source_comment(String(line_span))
+        var trimmed = safe_strip(line)
+
+        if not collecting:
+            if not trimmed.startswith("def "):
+                continue
+            signature = trimmed
+            balance = parenthesis_balance(trimmed)
+            collecting = True
+        else:
+            signature += " " + trimmed
+            balance += parenthesis_balance(trimmed)
+
+        if "(" not in signature or balance > 0:
+            continue
+
+        var name_start = signature.find("def ") + 4
+        var open_paren = signature.find("(")
+        var close_paren = signature.rfind(")")
+
+        if name_start < open_paren and close_paren > open_paren:
+            var handler_name = safe_strip(
+                substring_range(signature, name_start, open_paren)
+            )
+            var generic_start = handler_name.find("[")
+            if generic_start != -1:
+                handler_name = safe_strip(
+                    substring_range(handler_name, 0, generic_start)
+                )
+
+            var arguments_text = substring_range(
+                signature, open_paren + 1, close_paren
+            )
+            var arguments = split_top_level_arguments(arguments_text)
+            var request_position = -1
+
+            for i in range(len(arguments)):
+                var argument_type = extract_argument_type(arguments[i])
+                if is_http_request_type(argument_type):
+                    request_position = i
+                    break
+
+            if request_position != -1:
+                var i = request_position + 1
+                while i < len(arguments):
+                    var dto_type = extract_argument_type(arguments[i])
+                    if dto_type != "":
+                        handler_dtos[handler_name] = dto_type
+                        break
+                    i += 1
+
+        signature = String()
+        collecting = False
+        balance = 0
+
+    return handler_dtos^
+
 def extract_handlers(user_code: String) -> Dict[String, String]:
     var routes = Dict[String, String]()
     var lines = user_code.split("\n")
@@ -150,7 +387,50 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
 
     return routes^
 
-def generate_routes_code(routes: Dict[String, String]) -> String:
+def generated_dto_wrapper_name(handler: String) -> String:
+    var result = "__mojelly_dto_"
+    var bytes = handler.as_bytes()
+
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if (
+            (b >= 48 and b <= 57)
+            or (b >= 65 and b <= 90)
+            or (b >= 97 and b <= 122)
+            or b == 95
+        ):
+            result += chr(Int(b))
+        else:
+            result += "_"
+
+    return result
+
+def generate_dto_wrappers_code(
+    routes: Dict[String, String], handler_dtos: Dict[String, String]
+) -> String:
+    var code = ""
+    var generated = Dict[String, String]()
+
+    for key in routes.keys():
+        var handler = routes.get(key, "")
+        var dto_type = handler_dtos.get(handler, "")
+        if handler == "" or dto_type == "" or generated.get(handler, "") != "":
+            continue
+
+        var wrapper = generated_dto_wrapper_name(handler)
+        code += "def " + wrapper + "(req: HTTPRequest) -> HTTPResponse:\n"
+        code += "    var dto_opt = try_deserialize[" + dto_type + "](req.body)\n"
+        code += "    if not dto_opt:\n"
+        code += '        return HTTPResponse(400, "Invalid JSON body")\n'
+        code += "    var dto = dto_opt.take()\n"
+        code += "    return " + handler + "(req, dto^)\n\n"
+        generated[handler] = wrapper
+
+    return code
+
+def generate_routes_code(
+    routes: Dict[String, String], handler_dtos: Dict[String, String]
+) -> String:
     var code = ""
     var keys = List[String]()
 
@@ -164,7 +444,18 @@ def generate_routes_code(routes: Dict[String, String]) -> String:
         var path = String(parts[1])
         var handler = routes.get(key, "")
         if handler != "":
-            code += '    router_ptr[].add("' + method + '", "' + path + '", ' + handler + ')\n'
+            var registered_handler = handler
+            if handler_dtos.get(handler, "") != "":
+                registered_handler = generated_dto_wrapper_name(handler)
+            code += (
+                '    router_ptr[].add("'
+                + method
+                + '", "'
+                + path
+                + '", '
+                + registered_handler
+                + ')\n'
+            )
 
     return code
 
@@ -175,7 +466,18 @@ def generate_server(user_file: String) -> Optional[String]:
 
     var user_code = user_code_opt.value()
     var routes = extract_handlers(user_code)
-    var routes_code = generate_routes_code(routes)
+    var handler_dtos: Dict[String, String]
+    try:
+        handler_dtos = extract_handler_dtos(user_code)
+    except e:
+        print("❌ Error parsing handler signatures:")
+        print("   ", e)
+        return None
+    var dto_wrappers_code = generate_dto_wrappers_code(routes, handler_dtos)
+    var routes_code = generate_routes_code(routes, handler_dtos)
+    var json_import = String()
+    if dto_wrappers_code != "":
+        json_import = "from emberjson import try_deserialize"
 
     var main_code: String
     if USE_MULTITHREAD:
@@ -228,6 +530,7 @@ ROUTES_PLACEHOLDER
 
 from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
+JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
 from std.memory import Pointer
 from std.memory.alloc import alloc, dealloc, Layout, ThinAllocation
@@ -240,6 +543,11 @@ from std.time import sleep
 
 from USER_FILE import *
 
+# ============================================================
+# DTO HANDLER WRAPPERS
+# ============================================================
+
+DTO_WRAPPERS_PLACEHOLDER
 # ============================================================
 # TYPE'S COMPTIMES
 # ============================================================
@@ -414,6 +722,8 @@ struct HTTPServer:
 """
 
     template = template.replace("USER_FILE", user_file.replace(".mojo", "").replace("/", "."))
+    template = template.replace("JSON_IMPORT_PLACEHOLDER", json_import)
+    template = template.replace("DTO_WRAPPERS_PLACEHOLDER", dto_wrappers_code)
     template = template.replace("ROUTES_PLACEHOLDER", routes_code)
     return Optional[String](template)
 
