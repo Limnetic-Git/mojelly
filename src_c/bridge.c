@@ -13,12 +13,12 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 
-#define LOG_LEVEL 0
+#define LOG_LEVEL 1
 //0 - Errors only (recommended for best performance)
 //1 - Requests logs (recommended for default use)
 //2 - All logs (use for debug only)
 
-#define LOG_COLORS 0
+#define LOG_COLORS 1
 // 0 - u are boring, but little bit faster
 // 1 - u are cool =)
 
