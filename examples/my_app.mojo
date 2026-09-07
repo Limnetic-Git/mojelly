@@ -1,10 +1,9 @@
 from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
-from emberjson import try_deserialize, serialize
 
 @fieldwise_init
-struct CreateUserDTO(Movable, Defaultable):
+struct CreateUserDTO(Defaultable, Movable):
     var nickname: String
     var age: Int
 
@@ -12,23 +11,9 @@ struct CreateUserDTO(Movable, Defaultable):
         self.nickname = ""
         self.age = 0
 
-    def default() -> Self:
-        var result = Self()
-        result.nickname = ""
-        self.age = 0
-        return result^
-
-def create_user_handler(req: HTTPRequest) -> HTTPResponse: #В АРГУМЕНТЕ ДОЛЖНА БУДЕТ БЫТЬ dto: CreateUserDTO ДЛЯ ПАРСИНГА
-
-    # ВОТ ЭТО ЧАСТЬ ДОЛЖНА БУДЕТ ГЕНЕРИРОВАТЬСЯ
-    var dto_opt = try_deserialize[CreateUserDTO](req.body)
-    if not dto_opt:
-        return HTTPResponse(400, "Invalid parse JSON to DTO")
-    var dto = dto_opt.take()
-
-
+def create_user_handler(req: HTTPRequest, dto: CreateUserDTO) -> HTTPResponse:
     print("Age:", dto.age)
-    var adult = (True if dto.age >= 18 else False)
+    var adult = True if dto.age >= 18 else False
     print("Adult:", adult)
     print("Nickname:", dto.nickname)
 
