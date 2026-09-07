@@ -11,10 +11,7 @@ struct CreateUserDTO(Defaultable, Movable):
         self.nickname = ""
         self.age = 0
 
-def create_user_handler(
-    req: HTTPRequest,
-    dto: CreateUserDTO,
-) -> HTTPResponse:
+def create_user_handler(req: HTTPRequest, dto: CreateUserDTO) -> HTTPResponse:
     print("Age:", dto.age)
     var adult = True if dto.age >= 18 else False
     print("Adult:", adult)
