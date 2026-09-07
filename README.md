@@ -1,5 +1,9 @@
 # Mojelly Framework 🍇
 
+⭐ **Starred by [@lattner](https://github.com/lattner)** — creator of **LLVM**, **Swift**, and **Mojo** 
+
+Thank you, Chris :)
+
 <p align="center">
 </p>
 
@@ -25,43 +29,69 @@ simple to use and easy to contribute, that makes it good choice to you to join t
 
 ## Some benchmarks 📊
 
-### JSON response in UPDATE-5 (0.0.5-INDEV) using 4 threads (default): 
+### JSON response in UPDATE-7 (0.0.7-INDEV) using 4 threads (default): 
 ```bash
-❯ wrk -t4 -c100 -d5s http://localhost:8080/api/users
-Running 5s test @ http://localhost:8080/api/users
+❯ wrk -t4 -c100 -d5s http://localhost:8080/json
+Running 5s test @ http://localhost:8080/json
   4 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   182.15us  323.66us  18.43ms   99.61%
-    Req/Sec   142.25k    14.11k  171.39k    68.50%
-  2830900 requests in 5.01s, 380.67MB read
-Requests/sec: 565182.57
-Transfer/sec:     76.00MB
+    Latency   175.81us  110.82us   2.51ms   92.64%
+    Req/Sec   143.30k    12.24k  176.02k    66.00%
+  2848343 requests in 5.01s, 344.98MB read
+Requests/sec: 568252.06
+Transfer/sec:     68.82MB
 ```
 
-### Text response in UPDATE-5 (0.0.5-INDEV) using 4 threads (default):
+### Text response in UPDATE-7 (0.0.7-INDEV) using 4 threads (default):
 ```bash
 ❯ wrk -t4 -c100 -d5s http://localhost:8080/
 Running 5s test @ http://localhost:8080/
   4 threads and 100 connections
   Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   171.56us   96.79us   6.08ms   92.58%
-    Req/Sec   144.09k    16.87k  220.59k    66.50%
-  2867439 requests in 5.01s, 281.66MB read
-Requests/sec: 572749.87
-Transfer/sec:     56.26MB
+    Latency   172.56us   98.25us   2.74ms   90.90%
+    Req/Sec   144.09k    10.54k  196.64k    70.50%
+  2866244 requests in 5.01s, 276.08MB read
+Requests/sec: 572494.94
+Transfer/sec:     55.14MB
+```
+
+### HTML-page response in UPDATE-7 (0.0.7-INDEV) using 4 threads (default):
+```bash
+❯ wrk -t4 -c100 -d5s http://localhost:8080/html
+Running 5s test @ http://localhost:8080/html
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   213.75us   77.08us   4.41ms   89.62%
+    Req/Sec   116.12k     5.97k  137.13k    72.00%
+  2308867 requests in 5.01s, 1.67GB read
+Requests/sec: 460630.12
+Transfer/sec:    340.89MB
+```
+
+### DTO validation response in UPDATE-7 (0.0.7-INDEV) using 4 threads (default):
+```bash
+❯ wrk -t4 -c100 -d5s -s post.lua http://localhost:8080/user
+Running 5s test @ http://localhost:8080/user
+  4 threads and 100 connections
+  Thread Stats   Avg      Stdev     Max   +/- Stdev
+    Latency   194.81us   66.64us   2.07ms   87.49%
+    Req/Sec   126.52k     6.53k  152.52k    71.00%
+  2517629 requests in 5.01s, 242.50MB read
+Requests/sec: 502680.09
+Transfer/sec:     48.42MB
 ```
 And i will try to make **MORE RPS** cause I love **BLAZING** 🔥
-
 
 ## What we use ⚙️
 Mojo language
 C language
 Bash (for `build.sh`)
 llhttp
-libuv (soon will be change to io_uring)
-openssl
+libuv (soon maybe will be change to io_uring)
+openssl (not yet)
 pthread
 gcc compiler
+emberjson
 
 ## Mojelly's logo 🖼️
 **Mojelly's logo is a GRAPE! 🍇🍇🍇**
@@ -69,7 +99,7 @@ gcc compiler
 (*Idk why, "jelly" sounds cool and I associate with grapes*)
 
 # How to use it
-Here is syntax of UPDATE-5 (0.0.5-INDEV), which will **100%** change in **1.0.0**,
+Here is syntax of UPDATE-7 (0.0.7-INDEV), which will **100%** change in **1.0.0**,
 so check it out, but don't learn it hardly :)
 
 **⚠️ WARNING: FRAMEWORK (as like as Mojo) WORKS ONLY ON LINUX! USE WSL OR LINUX DISTRO**
@@ -79,32 +109,46 @@ so check it out, but don't learn it hardly :)
 from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
+from dto import UserDTO
+from test_html_page import test_html_page, test_css
 
-def home_handler(req: HTTPRequest) -> HTTPResponse:
-    return HTTPResponse(200, "Home Page 🏠")
+#Hello world plain text response
+def hello_world(req: HTTPRequest) -> HTTPResponse:
+    return HTTPResponse(200, "Hello, World")
 
-def about_handler(req: HTTPRequest) -> HTTPResponse:
-    return HTTPResponse(200, "About Page 📖")
-
-def users_handler(req: HTTPRequest) -> HTTPResponse:
-    var resp = HTTPResponse(200, '[{"id": 1, "name": "Alice"},{"id": 2, "name": "Bob"}]')
+#JSON response
+def json_test(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, '{"nickname":"Limnetic","age":17}')
     resp.set_json()
     return resp^
 
-def hello_handler(req: HTTPRequest) -> HTTPResponse:
-    var resp = HTTPResponse(200, '{"message": "Hello from Mojelly! 🍇"}')
-    resp.set_json()
+#HTML page response
+def html_page_test(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, test_html_page)
+    resp.set_html()
     return resp^
+
+#CSS response
+def css_test(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, test_css)
+    resp.set_css()
+    return resp^
+
+#With DTO validation
+def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+    if dto.age >= 18:
+        return HTTPResponse(200, dto.nickname + "is adult")
+    else:
+        return HTTPResponse(200, dto.nickname + "is not adult")
 
 def main():
-    print("🍇 Mojelly HTTP Server")
-
     var router = RouterHandlers()
 
-    router.get("/", home_handler)
-    router.post("/about", about_handler) # POST for test
-    router.get("/api/users", users_handler)
-    router.get("/api/hello", hello_handler)
+    router.get("/", hello_world)
+    router.get("/json", json_test)
+    router.get("/html", html_page_test)
+    router.get("/style.css", css_test)
+    router.post("/user", dto_validation_test)
 
     var server = HTTPServer(router)
     server.listen(8080)
@@ -124,23 +168,30 @@ Then, you can run your server! 🙂
 Normally is looks like that:
 
 ```console
-~/Документы/Mojo/mojelly-0.0.4
-❯ bash build.sh
+❯ bash build.sh 
+🔧 Using pixi environment...
+🔥 Using Mojo via pixi:
+Mojo 1.0.0 (ed45d567)
+
 🔍 Checking C core...
-✅ libmojelly.a is up to date
--rw-r--r-- 1 limnetic limnetic 16872 авг 25 15:50 lib/libmojelly.a
+📦 libmojelly.a not found, building...
+🔨 Building C core with -O3...
+✅ libmojelly.a rebuilt!
+-rw-r--r-- 1 limnetic limnetic 20610 сен  8 01:14 lib/libmojelly.a
 
 📢 Calling for server-code generator...
-Failed to initialize Crashpad.  Crash reporting will not be available.  Cause: while locating crashpad handler: unable to locate crashpad handler executable
 🔧 Generating server code...
+   Mode: MULTITHREADED
 ✅ Generated: build/app_generated.mojo
 📦 Run: ./build.sh
 
 📦 Building server...
-Failed to initialize Crashpad.  Crash reporting will not be available.  Cause: while locating crashpad handler: unable to locate crashpad handler executable
+
 ✅ Server built! Run ./server
 
-~/Документы/Mojo/mojelly-0.0.4
+   To run:
+   ./server
+
 ❯ ./server
 🍇 Mojelly HTTP Server (Multithreaded)
 [C] ✅ All 4 threads created
@@ -150,8 +201,8 @@ Failed to initialize Crashpad.  Crash reporting will not be available.  Cause: w
 [C] 🧵 Thread 3 listening on CPU 3 (port 8080)
 [C] 🧵 Thread 1 listening on CPU 1 (port 8080)
 [C] 🧵 Thread 0 listening on CPU 0 (port 8080)
-[03:38:52] [T0] POST /about 200 0.01ms
-[03:38:54] [T1] GET /about 404 0.00ms
+[03:38:52] [T0] GET / 200 0.01ms
+[03:38:54] [T1] GET /qwerty 404 0.00ms
 ```
 
 If you are interested, please ⭐ this project :)
