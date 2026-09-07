@@ -64,14 +64,12 @@ struct SourceQuoteState:
     def consume(mut self, byte: UInt8) -> Bool:
         if self.quote == 0:
             return False
-
         if self.escaped:
             self.escaped = False
         elif byte == 92:
             self.escaped = True
         elif byte == self.quote:
             self.quote = 0
-
         return True
 
 def quote_markers() -> Dict[UInt8, UInt8]:
@@ -105,7 +103,6 @@ def strip_source_comment(line: String) raises -> String:
         var b = bytes[i]
         if quote_state.consume(b):
             continue
-
         var opening_quote = quotes.get(b, 0)
         if opening_quote != 0:
             quote_state.quote = opening_quote
@@ -125,7 +122,6 @@ def parenthesis_balance(s: String) -> Int:
         var b = bytes[i]
         if quote_state.consume(b):
             continue
-
         var opening_quote = quotes.get(b, 0)
         if opening_quote != 0:
             quote_state.quote = opening_quote
@@ -288,7 +284,6 @@ def extract_handler_dtos(user_code: String) raises -> Dict[String, String]:
                         handler_dtos[handler_name] = dto_type
                         break
                     i += 1
-
         signature = String()
         collecting = False
         balance = 0
@@ -310,9 +305,7 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
         var line = String(line_span)
         var trimmed = line.strip()
 
-        if trimmed == "":
-            continue
-        if trimmed.startswith("#") or trimmed.startswith("//"):
+        if trimmed == "" or trimmed.startswith("#") or trimmed.startswith("//"):
             continue
 
         var method = ""
@@ -428,12 +421,9 @@ def generate_dto_wrappers_code(
         code += "    var dto = dto_opt.take()\n"
         code += "    return " + handler + "(req, dto^)\n\n"
         generated[handler] = wrapper
-
     return code
 
-def generate_routes_code(
-    routes: Dict[String, String], handler_dtos: Dict[String, String]
-) -> String:
+def generate_routes_code(routes: Dict[String, String], handler_dtos: Dict[String, String]) -> String:
     var code = ""
     var keys = List[String]()
 
@@ -459,14 +449,12 @@ def generate_routes_code(
                 + registered_handler
                 + ')\n'
             )
-
     return code
 
 def generate_server(user_file: String) -> Optional[String]:
     var user_code_opt = read_user_file(user_file)
     if user_code_opt is None:
         return None
-
     var user_code = user_code_opt.value()
     var routes = extract_handlers(user_code)
     var handler_dtos: Dict[String, String]
@@ -481,8 +469,8 @@ def generate_server(user_file: String) -> Optional[String]:
     var json_import = String()
     if dto_wrappers_code != "":
         json_import = "from emberjson import try_deserialize"
-
     var main_code_by_mode = Dict[Bool, String]()
+
     main_code_by_mode[True] = """
 def main():
     print("🍇 Mojelly HTTP Server (Multithreaded)")
@@ -729,7 +717,6 @@ struct HTTPServer:
     template = template.replace("ROUTES_PLACEHOLDER", routes_code)
     return Optional[String](template)
 
-
 def main():
     var modes = Dict[Bool, String]()
     modes[True] = "MULTITHREADED"
@@ -754,7 +741,6 @@ def main():
         pass
 
     var success = write_generated_file("build/app_generated.mojo", generated_code)
-
     if success:
         print("📦 Run: ./build.sh")
     else:
