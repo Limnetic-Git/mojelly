@@ -1,40 +1,46 @@
 from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
-from test_html_page import test_html_page
+from dto import UserDTO
+from test_html_page import test_html_page, test_css
 
-def home_handler(req: HTTPRequest) -> HTTPResponse:
-    return HTTPResponse(200, "Home Page 🏠")
+#Hello world plain text response
+def hello_world(req: HTTPRequest) -> HTTPResponse:
+    return HTTPResponse(200, "Hello, World")
 
-def test_handler(req: HTTPRequest) -> HTTPResponse:
+#JSON response
+def json_test(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, '{"nickname":"Limnetic","age":17}')
+    resp.set_json()
+    return resp^
+
+#HTML page response
+def html_page_test(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, test_html_page)
     resp.set_html()
-    print("[DEBUG] Content-Type:", resp.content_type)
     return resp^
 
-def about_handler(req: HTTPRequest) -> HTTPResponse:
-    return HTTPResponse(200, "About Page 📖")
-
-def users_handler(req: HTTPRequest) -> HTTPResponse:
-    var resp = HTTPResponse(200, '[{ "id":1, "name": "Alice"},{"id":2, "name": "Bob"}]')
-    resp.set_json()
+#CSS response
+def css_test(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, test_css)
+    resp.set_css()
     return resp^
 
-def hello_handler(req: HTTPRequest) -> HTTPResponse:
-    var resp = HTTPResponse(200, '{"message": "Hello from Mojelly! 🍇"}')
-    resp.set_json()
-    return resp^
+#With DTO validation
+def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+    if dto.age >= 18:
+        return HTTPResponse(200, dto.nickname + "is adult")
+    else:
+        return HTTPResponse(200, dto.nickname + "is not adult")
 
 def main():
-    print("🍇 Mojelly HTTP Server")
-
     var router = RouterHandlers()
 
-    router.get("/", home_handler)
-    router.get("/test-html", test_handler)
-    router.post("/about", about_handler)
-    router.get("/api/users", users_handler)
-    router.get("/api/hello", hello_handler)
+    router.get("/", hello_world)
+    router.get("/json", json_test)
+    router.get("/html", html_page_test)
+    router.get("/style.css", css_test)
+    router.post("/user", dto_validation_test)
 
     var server = HTTPServer(router)
     server.listen(8080)

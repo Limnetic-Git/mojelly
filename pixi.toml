@@ -1,0 +1,14 @@
+# pixi.toml
+[workspace]
+name = "mojelly"
+channels = [
+    "https://conda.modular.com/max-nightly",
+    "https://repo.prefix.dev/modular-community",
+    "conda-forge",
+]
+platforms = ["linux-64"]
+version = "0.6.0"
+
+[dependencies]
+mojo = "==1.0.0"
+emberjson = ">=0.3.0"
