@@ -53,6 +53,39 @@ def safe_strip(s: String) raises -> String:
     var trimmed = s.strip()
     return span_to_string(trimmed)
 
+struct SourceQuoteState:
+    var quote: UInt8
+    var escaped: Bool
+
+    def __init__(out self):
+        self.quote = 0
+        self.escaped = False
+
+    def consume(mut self, byte: UInt8) -> Bool:
+        if self.quote == 0:
+            return False
+
+        if self.escaped:
+            self.escaped = False
+        elif byte == 92:
+            self.escaped = True
+        elif byte == self.quote:
+            self.quote = 0
+
+        return True
+
+def quote_markers() -> Dict[UInt8, UInt8]:
+    var markers = Dict[UInt8, UInt8]()
+    markers[34] = 34
+    markers[39] = 39
+    return markers^
+
+def delimiter_deltas(opening: UInt8, closing: UInt8) -> Dict[UInt8, Int]:
+    var deltas = Dict[UInt8, Int]()
+    deltas[opening] = 1
+    deltas[closing] = -1
+    return deltas^
+
 def substring_range(s: String, start: Int, end: Int) raises -> String:
     var result = String()
     var bytes = s.as_bytes()
@@ -65,20 +98,17 @@ def substring_range(s: String, start: Int, end: Int) raises -> String:
 
 def strip_source_comment(line: String) raises -> String:
     var bytes = line.as_bytes()
-    var quote: UInt8 = 0
-    var escaped = False
+    var quotes = quote_markers()
+    var quote_state = SourceQuoteState()
 
     for i in range(len(bytes)):
         var b = bytes[i]
-        if quote != 0:
-            if escaped:
-                escaped = False
-            elif b == 92:
-                escaped = True
-            elif b == quote:
-                quote = 0
-        elif b == 34 or b == 39:
-            quote = b
+        if quote_state.consume(b):
+            continue
+
+        var opening_quote = quotes.get(b, 0)
+        if opening_quote != 0:
+            quote_state.quote = opening_quote
         elif b == 35:
             return substring_range(line, 0, i)
 
@@ -87,24 +117,21 @@ def strip_source_comment(line: String) raises -> String:
 def parenthesis_balance(s: String) -> Int:
     var bytes = s.as_bytes()
     var balance = 0
-    var quote: UInt8 = 0
-    var escaped = False
+    var quotes = quote_markers()
+    var parentheses = delimiter_deltas(40, 41)
+    var quote_state = SourceQuoteState()
 
     for i in range(len(bytes)):
         var b = bytes[i]
-        if quote != 0:
-            if escaped:
-                escaped = False
-            elif b == 92:
-                escaped = True
-            elif b == quote:
-                quote = 0
-        elif b == 34 or b == 39:
-            quote = b
-        elif b == 40:
-            balance += 1
-        elif b == 41:
-            balance -= 1
+        if quote_state.consume(b):
+            continue
+
+        var opening_quote = quotes.get(b, 0)
+        if opening_quote != 0:
+            quote_state.quote = opening_quote
+            continue
+
+        balance += parentheses.get(b, 0)
 
     return balance
 
@@ -114,44 +141,30 @@ def split_top_level_arguments(arguments: String) raises -> List[String]:
     var round_depth = 0
     var square_depth = 0
     var curly_depth = 0
-    var quote: UInt8 = 0
-    var escaped = False
     var bytes = arguments.as_bytes()
+    var quotes = quote_markers()
+    var parentheses = delimiter_deltas(40, 41)
+    var square_brackets = delimiter_deltas(91, 93)
+    var curly_brackets = delimiter_deltas(123, 125)
+    var quote_state = SourceQuoteState()
 
     for i in range(len(bytes)):
         var b = bytes[i]
-        if quote != 0:
+        if quote_state.consume(b):
             current += chr(Int(b))
-            if escaped:
-                escaped = False
-            elif b == 92:
-                escaped = True
-            elif b == quote:
-                quote = 0
             continue
 
-        if b == 34 or b == 39:
-            quote = b
+        var opening_quote = quotes.get(b, 0)
+        if opening_quote != 0:
+            quote_state.quote = opening_quote
             current += chr(Int(b))
-        elif b == 40:
-            round_depth += 1
-            current += chr(Int(b))
-        elif b == 41:
-            round_depth -= 1
-            current += chr(Int(b))
-        elif b == 91:
-            square_depth += 1
-            current += chr(Int(b))
-        elif b == 93:
-            square_depth -= 1
-            current += chr(Int(b))
-        elif b == 123:
-            curly_depth += 1
-            current += chr(Int(b))
-        elif b == 125:
-            curly_depth -= 1
-            current += chr(Int(b))
-        elif b == 44 and round_depth == 0 and square_depth == 0 and curly_depth == 0:
+            continue
+
+        round_depth += parentheses.get(b, 0)
+        square_depth += square_brackets.get(b, 0)
+        curly_depth += curly_brackets.get(b, 0)
+
+        if b == 44 and round_depth == 0 and square_depth == 0 and curly_depth == 0:
             result.append(safe_strip(current))
             current = String()
         else:
@@ -167,35 +180,27 @@ def find_top_level_byte(s: String, target: UInt8) -> Int:
     var round_depth = 0
     var square_depth = 0
     var curly_depth = 0
-    var quote: UInt8 = 0
-    var escaped = False
+    var quotes = quote_markers()
+    var parentheses = delimiter_deltas(40, 41)
+    var square_brackets = delimiter_deltas(91, 93)
+    var curly_brackets = delimiter_deltas(123, 125)
+    var quote_state = SourceQuoteState()
 
     for i in range(len(bytes)):
         var b = bytes[i]
-        if quote != 0:
-            if escaped:
-                escaped = False
-            elif b == 92:
-                escaped = True
-            elif b == quote:
-                quote = 0
+        if quote_state.consume(b):
             continue
 
-        if b == 34 or b == 39:
-            quote = b
-        elif b == 40:
-            round_depth += 1
-        elif b == 41:
-            round_depth -= 1
-        elif b == 91:
-            square_depth += 1
-        elif b == 93:
-            square_depth -= 1
-        elif b == 123:
-            curly_depth += 1
-        elif b == 125:
-            curly_depth -= 1
-        elif b == target and round_depth == 0 and square_depth == 0 and curly_depth == 0:
+        var opening_quote = quotes.get(b, 0)
+        if opening_quote != 0:
+            quote_state.quote = opening_quote
+            continue
+
+        round_depth += parentheses.get(b, 0)
+        square_depth += square_brackets.get(b, 0)
+        curly_depth += curly_brackets.get(b, 0)
+
+        if b == target and round_depth == 0 and square_depth == 0 and curly_depth == 0:
             return i
 
     return -1
@@ -293,6 +298,13 @@ def extract_handler_dtos(user_code: String) raises -> Dict[String, String]:
 def extract_handlers(user_code: String) -> Dict[String, String]:
     var routes = Dict[String, String]()
     var lines = user_code.split("\n")
+    var patterns = Dict[String, String]()
+    patterns["router.get("] = "GET"
+    patterns["router.post("] = "POST"
+    patterns["router.put("] = "PUT"
+    patterns["router.delete("] = "DELETE"
+    patterns["router.patch("] = "PATCH"
+    patterns["router.add("] = "GET"
 
     for line_span in lines:
         var line = String(line_span)
@@ -308,19 +320,10 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
         var handler = ""
         var found = False
 
-        var patterns = [
-            ("router.get(", "GET", 11),
-            ("router.post(", "POST", 12),
-            ("router.put(", "PUT", 11),
-            ("router.delete(", "DELETE", 14),
-            ("router.patch(", "PATCH", 12),
-            ("router.add(", "GET", 11)
-        ]
-
-        for pattern, meth, pattern_len in patterns:
+        for pattern in patterns.keys():
             if pattern in trimmed:
-                method = meth
-                var start = trimmed.find(pattern) + pattern_len
+                method = patterns.get(pattern, "")
+                var start = trimmed.find(pattern) + len(pattern.as_bytes())
                 var end = trimmed.rfind(")")
                 if start != -1 and end != -1 and start < end:
                     var args_str = String()
@@ -470,7 +473,7 @@ def generate_server(user_file: String) -> Optional[String]:
     try:
         handler_dtos = extract_handler_dtos(user_code)
     except e:
-        print("❌ Error parsing handler signatures:")
+        print("Error parsing handler signatures:")
         print("   ", e)
         return None
     var dto_wrappers_code = generate_dto_wrappers_code(routes, handler_dtos)
@@ -479,9 +482,8 @@ def generate_server(user_file: String) -> Optional[String]:
     if dto_wrappers_code != "":
         json_import = "from emberjson import try_deserialize"
 
-    var main_code: String
-    if USE_MULTITHREAD:
-        main_code = """
+    var main_code_by_mode = Dict[Bool, String]()
+    main_code_by_mode[True] = """
 def main():
     print("🍇 Mojelly HTTP Server (Multithreaded)")
 
@@ -507,8 +509,7 @@ ROUTES_PLACEHOLDER
     while True:
         sleep(1000)
 """
-    else:
-        main_code = """
+    main_code_by_mode[False] = """
 def main():
     print("🍇 Mojelly HTTP Server (Single-threaded)")
 
@@ -521,6 +522,7 @@ ROUTES_PLACEHOLDER
     server.listen(port)
     server.run()
 """
+    var main_code = main_code_by_mode.get(USE_MULTITHREAD, "")
 
     var template = """
 # ============================================================
@@ -729,7 +731,10 @@ struct HTTPServer:
 
 
 def main():
-    var mode = "MULTITHREADED" if USE_MULTITHREAD else "SINGLE-THREADED"
+    var modes = Dict[Bool, String]()
+    modes[True] = "MULTITHREADED"
+    modes[False] = "SINGLE-THREADED"
+    var mode = modes.get(USE_MULTITHREAD, "")
     print("🔧 Generating server code...")
     print("   Mode:", mode)
 
