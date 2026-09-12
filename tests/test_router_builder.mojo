@@ -1,6 +1,7 @@
 from mojelly.core.router_builder import RouterBuilder
 from std.testing import assert_equal
 
+
 def test_router_builder() raises:
     var builder = RouterBuilder()
     assert_equal(len(builder.get_paths()), 0)
@@ -28,6 +29,7 @@ def test_router_builder() raises:
 
     assert_equal(paths[3], "/account")
     assert_equal(handlers[3], "account_delete_handler")
+
 
 def main() raises:
     print("Running RouterBuilder tests...")

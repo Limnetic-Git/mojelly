@@ -1,6 +1,7 @@
 from mojelly.http.response import HTTPResponse, get_status_phrase
 from std.testing import assert_equal
 
+
 def test_default_response() raises:
     var resp = HTTPResponse()
     assert_equal(resp.status, 200)
@@ -8,11 +9,13 @@ def test_default_response() raises:
     assert_equal(resp.content_type, "text/plain")
     assert_equal(len(resp.headers), 0)
 
+
 def test_custom_response() raises:
     var resp = HTTPResponse(404, "Nothing here")
     assert_equal(resp.status, 404)
     assert_equal(resp.body, "Nothing here")
     assert_equal(resp.content_type, "text/plain")
+
 
 def test_content_type_setters() raises:
     var resp = HTTPResponse()
@@ -28,6 +31,7 @@ def test_content_type_setters() raises:
     resp.set_css()
     assert_equal(resp.content_type, "text/css")
 
+
 def test_response_headers() raises:
     var resp = HTTPResponse(200, "ok")
     resp.set_header("Server", "Mojelly")
@@ -36,6 +40,7 @@ def test_response_headers() raises:
     assert_equal(resp.headers.get("Server", ""), "Mojelly")
     assert_equal(resp.headers.get("X-Frame-Options", ""), "DENY")
     assert_equal(resp.headers.get("Missing", ""), "")
+
 
 def test_status_phrases() raises:
     assert_equal(get_status_phrase(200), "OK")
@@ -54,6 +59,7 @@ def test_status_phrases() raises:
     assert_equal(get_status_phrase(502), "Bad Gateway")
     assert_equal(get_status_phrase(503), "Service Unavailable")
     assert_equal(get_status_phrase(999), "OK")
+
 
 def main() raises:
     print("Running HTTPResponse tests...")

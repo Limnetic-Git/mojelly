@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
+
+jobs:
+  lint-and-test:
+    name: Lint, Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system C dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libuv1-dev \
+            libllhttp-dev \
+            libssl-dev \
+            gcc \
+            python3
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.80.0
+          cache: true
+
+      - name: Run Linters & Checks
+        run: pixi run lint
+
+      - name: Build Server
+        run: pixi run build
+
+      - name: Run Test Suite
+        run: pixi run test

@@ -3,23 +3,30 @@ from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
 from std.testing import assert_equal
 
+
 def handle_get_root(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "root")
+
 
 def handle_get_items(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "items: " + req.query_string)
 
+
 def handle_post_items(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(201, "created item: " + req.body)
+
 
 def handle_put_item(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "updated")
 
+
 def handle_delete_item(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(204, "")
 
+
 def handle_patch_item(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "patched")
+
 
 def test_router_methods() raises:
     var router = RouterHandlers()
@@ -76,6 +83,7 @@ def test_router_methods() raises:
     var req8 = HTTPRequest(url="/items", method="DELETE")
     var resp8 = router.handle(req8)
     assert_equal(resp8.status, 404)
+
 
 def main() raises:
     print("Running RouterHandlers tests...")

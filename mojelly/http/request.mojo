@@ -11,14 +11,16 @@ struct HTTPRequest:
         url: String = "",
         method: String = "GET",
         path: String = "",
-        query_string: String = ""
+        query_string: String = "",
     ):
         self.url = url
         if path == "" and url != "":
             var q_pos = url.find("?")
             if q_pos != -1:
                 self.path = String(url[byte=0:q_pos])
-                self.query_string = String(url[byte=q_pos + 1:len(url.as_bytes())])
+                self.query_string = String(
+                    url[byte = q_pos + 1 : len(url.as_bytes())]
+                )
             else:
                 self.path = url
                 self.query_string = ""
