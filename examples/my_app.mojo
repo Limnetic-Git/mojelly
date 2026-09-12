@@ -4,34 +4,40 @@ from mojelly.core.router_handlers import RouterHandlers
 from dto import UserDTO
 from test_html_page import test_html_page, test_css
 
-#Hello world plain text response
+
+# Hello world plain text response
 def hello_world(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "Hello, World")
 
-#JSON response
+
+# JSON response
 def json_test(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, '{"nickname":"Limnetic","age":17}')
     resp.set_json()
     return resp^
 
-#HTML page response
+
+# HTML page response
 def html_page_test(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, test_html_page)
     resp.set_html()
     return resp^
 
-#CSS response
+
+# CSS response
 def css_test(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, test_css)
     resp.set_css()
     return resp^
 
-#With DTO validation
+
+# With DTO validation
 def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
     if dto.age >= 18:
         return HTTPResponse(200, dto.nickname + "is adult")
     else:
         return HTTPResponse(200, dto.nickname + "is not adult")
+
 
 # Echo request header and set response header
 def headers_test(req: HTTPRequest) -> HTTPResponse:
@@ -40,9 +46,13 @@ def headers_test(req: HTTPRequest) -> HTTPResponse:
     resp.set_header("X-Test-Response", "MojellyOK")
     return resp^
 
+
 # Echo query string
 def query_test(req: HTTPRequest) -> HTTPResponse:
-    return HTTPResponse(200, "Path: " + req.path + ", Query: " + req.query_string)
+    return HTTPResponse(
+        200, "Path: " + req.path + ", Query: " + req.query_string
+    )
+
 
 def main():
     var router = RouterHandlers()

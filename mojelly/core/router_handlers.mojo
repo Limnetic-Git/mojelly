@@ -3,6 +3,7 @@ from mojelly.http.response import HTTPResponse
 
 comptime Handler = def(HTTPRequest) thin -> HTTPResponse
 
+
 struct RouterHandlers:
     var handlers: Dict[String, Handler]
 

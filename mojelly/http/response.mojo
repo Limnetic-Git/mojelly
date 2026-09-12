@@ -25,6 +25,7 @@ struct HTTPResponse:
     def set_header(mut self, name: String, value: String):
         self.headers[name] = value
 
+
 def get_status_phrase(status: Int32) -> String:
     if status == 200:
         return "OK"
