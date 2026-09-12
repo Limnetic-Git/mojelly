@@ -30,6 +30,7 @@ jobs:
             python3
           git clone --depth 1 -b release/v9.4.3 https://github.com/nodejs/llhttp.git /tmp/llhttp
           cmake -B /tmp/llhttp/build -S /tmp/llhttp -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build /tmp/llhttp/build -j
           sudo cmake --install /tmp/llhttp/build
           sudo ldconfig
 
