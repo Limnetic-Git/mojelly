@@ -12,3 +12,8 @@ version = "0.6.0"
 [dependencies]
 mojo = "==1.0.0"
 emberjson = ">=0.3.0"
+
+[tasks]
+build = "bash build.sh"
+run = "./server"
+test = "bash run_tests.sh"
