@@ -1,10 +1,11 @@
-#This script is generating final code of your product with Mojelly 🍇
-#Final code is in build directory
+# This script is generating final code of your product with Mojelly 🍇
+# Final code is in build directory
 
 from std.os import mkdir
 from std.memory.alloc import alloc, dealloc, Layout
 
-comptime USE_MULTITHREAD: Bool = True # U can turn it off, but its not recommended =)
+comptime USE_MULTITHREAD: Bool = True  # U can turn it off, but its not recommended =)
+
 
 def read_user_file(path: String) -> Optional[String]:
     try:
@@ -17,6 +18,7 @@ def read_user_file(path: String) -> Optional[String]:
         print("   ", e)
         return None
 
+
 def write_generated_file(path: String, content: String) -> Bool:
     try:
         var file = open(path, "w")
@@ -27,6 +29,7 @@ def write_generated_file(path: String, content: String) -> Bool:
     except:
         return False
 
+
 def span_to_string(span: StringSpan) raises -> String:
     var result = String()
     var bytes = span.as_bytes()
@@ -34,12 +37,14 @@ def span_to_string(span: StringSpan) raises -> String:
         result += chr(Int(bytes[i]))
     return result
 
+
 def bytes_to_string(bytes_arr: Span[UInt8, _]) raises -> String:
     var result = String()
     for i in range(len(bytes_arr)):
         var b = bytes_arr[i]
         result += chr(Int(b))
     return result
+
 
 def substring_before(s: String, pos: Int) raises -> String:
     var result = String()
@@ -49,9 +54,11 @@ def substring_before(s: String, pos: Int) raises -> String:
             result += chr(Int(bytes[i]))
     return result
 
+
 def safe_strip(s: String) raises -> String:
     var trimmed = s.strip()
     return span_to_string(trimmed)
+
 
 struct SourceQuoteState:
     var quote: UInt8
@@ -72,17 +79,20 @@ struct SourceQuoteState:
             self.quote = 0
         return True
 
+
 def quote_markers() -> Dict[UInt8, UInt8]:
     var markers = Dict[UInt8, UInt8]()
     markers[34] = 34
     markers[39] = 39
     return markers^
 
+
 def delimiter_deltas(opening: UInt8, closing: UInt8) -> Dict[UInt8, Int]:
     var deltas = Dict[UInt8, Int]()
     deltas[opening] = 1
     deltas[closing] = -1
     return deltas^
+
 
 def substring_range(s: String, start: Int, end: Int) raises -> String:
     var result = String()
@@ -93,6 +103,7 @@ def substring_range(s: String, start: Int, end: Int) raises -> String:
             result += chr(Int(bytes[i]))
         i += 1
     return result
+
 
 def strip_source_comment(line: String) raises -> String:
     var bytes = line.as_bytes()
@@ -110,6 +121,7 @@ def strip_source_comment(line: String) raises -> String:
             return substring_range(line, 0, i)
 
     return line
+
 
 def parenthesis_balance(s: String) -> Int:
     var bytes = s.as_bytes()
@@ -130,6 +142,7 @@ def parenthesis_balance(s: String) -> Int:
         balance += parentheses.get(b, 0)
 
     return balance
+
 
 def split_top_level_arguments(arguments: String) raises -> List[String]:
     var result = List[String]()
@@ -160,7 +173,12 @@ def split_top_level_arguments(arguments: String) raises -> List[String]:
         square_depth += square_brackets.get(b, 0)
         curly_depth += curly_brackets.get(b, 0)
 
-        if b == 44 and round_depth == 0 and square_depth == 0 and curly_depth == 0:
+        if (
+            b == 44
+            and round_depth == 0
+            and square_depth == 0
+            and curly_depth == 0
+        ):
             result.append(safe_strip(current))
             current = String()
         else:
@@ -170,6 +188,7 @@ def split_top_level_arguments(arguments: String) raises -> List[String]:
         result.append(safe_strip(current))
 
     return result^
+
 
 def find_top_level_byte(s: String, target: UInt8) -> Int:
     var bytes = s.as_bytes()
@@ -196,10 +215,16 @@ def find_top_level_byte(s: String, target: UInt8) -> Int:
         square_depth += square_brackets.get(b, 0)
         curly_depth += curly_brackets.get(b, 0)
 
-        if b == target and round_depth == 0 and square_depth == 0 and curly_depth == 0:
+        if (
+            b == target
+            and round_depth == 0
+            and square_depth == 0
+            and curly_depth == 0
+        ):
             return i
 
     return -1
+
 
 def extract_argument_type(argument: String) raises -> String:
     var colon = find_top_level_byte(argument, 58)
@@ -215,6 +240,7 @@ def extract_argument_type(argument: String) raises -> String:
 
     return safe_strip(type_expression)
 
+
 def is_http_request_type(type_name: String) -> Bool:
     if type_name == "HTTPRequest":
         return True
@@ -225,6 +251,7 @@ def is_http_request_type(type_name: String) -> Bool:
 
     var bytes = type_name.as_bytes()
     return position + 11 == len(bytes) and bytes[position - 1] == 46
+
 
 def extract_handler_dtos(user_code: String) raises -> Dict[String, String]:
     var handler_dtos = Dict[String, String]()
@@ -289,6 +316,7 @@ def extract_handler_dtos(user_code: String) raises -> Dict[String, String]:
         balance = 0
 
     return handler_dtos^
+
 
 def extract_handlers(user_code: String) -> Dict[String, String]:
     var routes = Dict[String, String]()
@@ -360,7 +388,9 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
 
                         if paren_pos == -1:
                             try:
-                                var clean_span = Span[UInt8](clean_handler_bytes)
+                                var clean_span = Span[UInt8](
+                                    clean_handler_bytes
+                                )
                                 handler = bytes_to_string(clean_span)
                             except:
                                 handler = ""
@@ -383,6 +413,7 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
 
     return routes^
 
+
 def generated_dto_wrapper_name(handler: String) -> String:
     var result = "__mojelly_dto_"
     var bytes = handler.as_bytes()
@@ -401,6 +432,7 @@ def generated_dto_wrapper_name(handler: String) -> String:
 
     return result
 
+
 def generate_dto_wrappers_code(
     routes: Dict[String, String], handler_dtos: Dict[String, String]
 ) -> String:
@@ -415,7 +447,9 @@ def generate_dto_wrappers_code(
 
         var wrapper = generated_dto_wrapper_name(handler)
         code += "def " + wrapper + "(req: HTTPRequest) -> HTTPResponse:\n"
-        code += "    var dto_opt = try_deserialize[" + dto_type + "](req.body)\n"
+        code += (
+            "    var dto_opt = try_deserialize[" + dto_type + "](req.body)\n"
+        )
         code += "    if not dto_opt:\n"
         code += '        return HTTPResponse(400, "Invalid JSON body")\n'
         code += "    var dto = dto_opt.take()\n"
@@ -423,7 +457,10 @@ def generate_dto_wrappers_code(
         generated[handler] = wrapper
     return code
 
-def generate_routes_code(routes: Dict[String, String], handler_dtos: Dict[String, String]) -> String:
+
+def generate_routes_code(
+    routes: Dict[String, String], handler_dtos: Dict[String, String]
+) -> String:
     var code = ""
     var keys = List[String]()
 
@@ -447,9 +484,10 @@ def generate_routes_code(routes: Dict[String, String], handler_dtos: Dict[String
                 + path
                 + '", '
                 + registered_handler
-                + ')\n'
+                + ")\n"
             )
     return code
+
 
 def generate_server(user_file: String) -> Optional[String]:
     var user_code_opt = read_user_file(user_file)
@@ -471,7 +509,9 @@ def generate_server(user_file: String) -> Optional[String]:
         json_import = "from emberjson import try_deserialize"
     var main_code_by_mode = Dict[Bool, String]()
 
-    main_code_by_mode[True] = """
+    main_code_by_mode[
+        True
+    ] = """
 def main():
     print("🍇 Mojelly HTTP Server (Multithreaded)")
 
@@ -497,7 +537,9 @@ ROUTES_PLACEHOLDER
     while True:
         sleep(1000)
 """
-    main_code_by_mode[False] = """
+    main_code_by_mode[
+        False
+    ] = """
 def main():
     print("🍇 Mojelly HTTP Server (Single-threaded)")
 
@@ -512,14 +554,15 @@ ROUTES_PLACEHOLDER
 """
     var main_code = main_code_by_mode.get(USE_MULTITHREAD, "")
 
-    var template = """
+    var template = (
+        """
 # ============================================================
 # THIS FILE WAS GENERATED BY MOJELLY 🍇!
 # For cool guys only 😎
 # ============================================================
 
 from mojelly.http.request import HTTPRequest
-from mojelly.http.response import HTTPResponse
+from mojelly.http.response import HTTPResponse, get_status_phrase
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
 from std.memory import Pointer
@@ -602,15 +645,14 @@ def mojelly_free_response(ptr: C_UInt8) -> None:
 # ============================================================
 
 def c_string_to_string(ptr: C_UInt8) -> String:
-    var result = String()
-    var i = 0
-    while True:
-        var ch = ptr.unsafe_offset(i)[]
-        if ch == 0:
-            break
-        result += chr(Int(ch))
-        i += 1
-    return result
+    var len = 0
+    while ptr.unsafe_offset(len)[] != 0:
+        len += 1
+    if len == 0:
+        return ""
+    var span = Span[UInt8](unsafe_ptr=ptr, length=len)
+    var slice = StringSlice(unsafe_from_utf8=span)
+    return String(slice)
 
 def string_to_c_string(s: String) -> C_UInt8:
     var bytes = s.as_bytes()
@@ -630,6 +672,7 @@ def mojo_handler(
     router_ptr: Optional[Pointer[RouterHandlers, MutUntrackedOrigin]],
     url_ptr: C_UInt8,
     method_ptr: C_UInt8,
+    headers_ptr: C_UInt8,
     body_ptr: C_UInt8
 ) abi("C") -> C_UInt8:
 
@@ -640,22 +683,36 @@ def mojo_handler(
     var router = router_ptr.value()
     var url = c_string_to_string(url_ptr)
     var method = c_string_to_string(method_ptr)
+    var headers_str = c_string_to_string(headers_ptr)
     var body = c_string_to_string(body_ptr)
 
-    var request = HTTPRequest()
-    request.url = url
-    request.method = method
+    var request = HTTPRequest(url=url, method=method)
     request.body = body
+
+    if headers_str != "":
+        for line_span in headers_str.split("\\r\\n"):
+            var line = String(line_span)
+            var colon = line.find(":")
+            if colon != -1:
+                var key = String(line[byte=0:colon]).strip()
+                var val = String(line[byte=colon + 1:len(line.as_bytes())]).strip()
+                request.headers[String(key)] = String(val)
+
     var router_response = router[].handle(request)
 
     var body_len = router_response.body.byte_length()
     var http_response = String()
     http_response += "HTTP/1.1 "
     http_response += String(router_response.status)
-    http_response += " OK\\r\\n"
+    http_response += " " + get_status_phrase(router_response.status) + "\\r\\n"
     http_response += "Content-Type: " + router_response.content_type + "\\r\\n"
     http_response += "Content-Length: " + String(body_len) + "\\r\\n"
     http_response += "Connection: keep-alive\\r\\n"
+
+    for header_key in router_response.headers.keys():
+        var val = router_response.headers.get(header_key, "")
+        http_response += header_key + ": " + val + "\\r\\n"
+
     http_response += "\\r\\n"
     http_response += router_response.body
 
@@ -708,14 +765,20 @@ struct HTTPServer:
 # MAIN
 # ============================================================
 
-""" + main_code + """
 """
+        + main_code
+        + """
+"""
+    )
 
-    template = template.replace("USER_FILE", user_file.replace(".mojo", "").replace("/", "."))
+    template = template.replace(
+        "USER_FILE", user_file.replace(".mojo", "").replace("/", ".")
+    )
     template = template.replace("JSON_IMPORT_PLACEHOLDER", json_import)
     template = template.replace("DTO_WRAPPERS_PLACEHOLDER", dto_wrappers_code)
     template = template.replace("ROUTES_PLACEHOLDER", routes_code)
     return Optional[String](template)
+
 
 def main():
     var modes = Dict[Bool, String]()
@@ -740,7 +803,9 @@ def main():
     except:
         pass
 
-    var success = write_generated_file("build/app_generated.mojo", generated_code)
+    var success = write_generated_file(
+        "build/app_generated.mojo", generated_code
+    )
     if success:
         print("📦 Run: ./build.sh")
     else:
