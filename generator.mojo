@@ -519,7 +519,7 @@ ROUTES_PLACEHOLDER
 # ============================================================
 
 from mojelly.http.request import HTTPRequest
-from mojelly.http.response import HTTPResponse
+from mojelly.http.response import HTTPResponse, get_status_phrase
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
 from std.memory import Pointer
@@ -602,15 +602,14 @@ def mojelly_free_response(ptr: C_UInt8) -> None:
 # ============================================================
 
 def c_string_to_string(ptr: C_UInt8) -> String:
-    var result = String()
-    var i = 0
-    while True:
-        var ch = ptr.unsafe_offset(i)[]
-        if ch == 0:
-            break
-        result += chr(Int(ch))
-        i += 1
-    return result
+    var len = 0
+    while ptr.unsafe_offset(len)[] != 0:
+        len += 1
+    if len == 0:
+        return ""
+    var span = Span[UInt8](unsafe_ptr=ptr, length=len)
+    var slice = StringSlice(unsafe_from_utf8=span)
+    return String(slice)
 
 def string_to_c_string(s: String) -> C_UInt8:
     var bytes = s.as_bytes()
@@ -630,6 +629,7 @@ def mojo_handler(
     router_ptr: Optional[Pointer[RouterHandlers, MutUntrackedOrigin]],
     url_ptr: C_UInt8,
     method_ptr: C_UInt8,
+    headers_ptr: C_UInt8,
     body_ptr: C_UInt8
 ) abi("C") -> C_UInt8:
 
@@ -640,22 +640,36 @@ def mojo_handler(
     var router = router_ptr.value()
     var url = c_string_to_string(url_ptr)
     var method = c_string_to_string(method_ptr)
+    var headers_str = c_string_to_string(headers_ptr)
     var body = c_string_to_string(body_ptr)
 
-    var request = HTTPRequest()
-    request.url = url
-    request.method = method
+    var request = HTTPRequest(url=url, method=method)
     request.body = body
+
+    if headers_str != "":
+        for line_span in headers_str.split("\\r\\n"):
+            var line = String(line_span)
+            var colon = line.find(":")
+            if colon != -1:
+                var key = String(line[byte=0:colon]).strip()
+                var val = String(line[byte=colon + 1:len(line.as_bytes())]).strip()
+                request.headers[String(key)] = String(val)
+
     var router_response = router[].handle(request)
 
     var body_len = router_response.body.byte_length()
     var http_response = String()
     http_response += "HTTP/1.1 "
     http_response += String(router_response.status)
-    http_response += " OK\\r\\n"
+    http_response += " " + get_status_phrase(router_response.status) + "\\r\\n"
     http_response += "Content-Type: " + router_response.content_type + "\\r\\n"
     http_response += "Content-Length: " + String(body_len) + "\\r\\n"
     http_response += "Connection: keep-alive\\r\\n"
+
+    for header_key in router_response.headers.keys():
+        var val = router_response.headers.get(header_key, "")
+        http_response += header_key + ": " + val + "\\r\\n"
+
     http_response += "\\r\\n"
     http_response += router_response.body
 

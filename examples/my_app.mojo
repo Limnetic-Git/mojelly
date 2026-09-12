@@ -33,6 +33,17 @@ def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
     else:
         return HTTPResponse(200, dto.nickname + "is not adult")
 
+# Echo request header and set response header
+def headers_test(req: HTTPRequest) -> HTTPResponse:
+    var incoming = req.get_header("X-Test-Request")
+    var resp = HTTPResponse(200, "Header received: " + incoming)
+    resp.set_header("X-Test-Response", "MojellyOK")
+    return resp^
+
+# Echo query string
+def query_test(req: HTTPRequest) -> HTTPResponse:
+    return HTTPResponse(200, "Path: " + req.path + ", Query: " + req.query_string)
+
 def main():
     var router = RouterHandlers()
 
@@ -40,6 +51,8 @@ def main():
     router.get("/json", json_test)
     router.get("/html", html_page_test)
     router.get("/style.css", css_test)
+    router.get("/headers", headers_test)
+    router.get("/query", query_test)
     router.post("/user", dto_validation_test)
 
     var server = HTTPServer(router)
