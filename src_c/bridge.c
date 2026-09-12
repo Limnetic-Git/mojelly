@@ -22,9 +22,6 @@
 // 0 - u are boring, but little bit faster
 // 1 - u are cool =)
 
-
-static void on_close_c(uv_handle_t* handle);
-
 #if LOG_COLORS
 #define COLOR_RESET   "\033[0m"
 #define COLOR_GREEN   "\033[32m"
@@ -45,26 +42,80 @@ static void on_close_c(uv_handle_t* handle);
 #define COLOR_BOLD    ""
 #endif
 
-#if LOG_LEVEL >= 0
-#define LOG_ERROR(fmt, ...)
-#define LOG_REQUEST(fmt, ...)
-#define LOG_DEBUG(fmt, ...)
-#else
-#define LOG_ERROR(fmt, ...)
-#define LOG_REQUEST(fmt, ...)
-#define LOG_DEBUG(fmt, ...)
-#endif
-
 static __thread int current_thread_id = -1;
 static __thread unsigned long request_count = 0;
 
-extern char* mojo_handler(void* router, const char* url, const char* method, const char* body);
+extern char* mojo_handler(void* router, const char* url, const char* method, const char* headers, const char* body);
 
 static void* global_router = NULL;
 
 void mojelly_set_router(void* router) {
     global_router = router;
 }
+
+typedef struct {
+    char* data;
+    size_t len;
+    size_t cap;
+} buffer_t;
+
+static void buf_init(buffer_t* b) {
+    b->data = NULL;
+    b->len = 0;
+    b->cap = 0;
+}
+
+static void buf_reset(buffer_t* b) {
+    b->len = 0;
+    if (b->data != NULL) {
+        b->data[0] = '\0';
+    }
+}
+
+static void buf_free(buffer_t* b) {
+    if (b->data != NULL) {
+        free(b->data);
+        b->data = NULL;
+    }
+    b->len = 0;
+    b->cap = 0;
+}
+
+static int buf_append(buffer_t* b, const char* data, size_t len) {
+    if (len == 0) return 0;
+    if (b->len + len + 1 > b->cap) {
+        size_t new_cap = (b->cap == 0) ? 256 : b->cap * 2;
+        while (new_cap < b->len + len + 1) {
+            new_cap *= 2;
+        }
+        char* new_data = (char*)realloc(b->data, new_cap);
+        if (!new_data) return -1;
+        b->data = new_data;
+        b->cap = new_cap;
+    }
+    memcpy(b->data + b->len, data, len);
+    b->len += len;
+    b->data[b->len] = '\0';
+    return 0;
+}
+
+typedef enum {
+    HEADER_STATE_NONE = 0,
+    HEADER_STATE_FIELD,
+    HEADER_STATE_VALUE
+} header_state_t;
+
+typedef struct {
+    uv_tcp_t client;
+    llhttp_t parser;
+    llhttp_settings_t settings;
+    buffer_t url;
+    buffer_t headers;
+    buffer_t body;
+    header_state_t header_state;
+    int keep_alive;
+    void* router;
+} client_ctx_t;
 
 typedef struct {
     uv_write_t req;
@@ -74,17 +125,6 @@ typedef struct {
 } write_req_t;
 
 typedef struct {
-    llhttp_t parser;
-    llhttp_settings_t settings;
-    char* url;
-    char* method;
-    char* body;
-    size_t body_len;
-    int headers_complete;
-    int status_code;
-} http_parser_t;
-
-typedef struct {
     int port;
     void* router;
     int thread_id;
@@ -92,6 +132,7 @@ typedef struct {
 } thread_args_t;
 
 static const char* http_500 = "HTTP/1.1 500 Internal Server Error\r\n\r\n";
+static const char* http_400 = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n";
 
 #if LOG_LEVEL >= 1
 static const char* get_method_color(const char* method) {
@@ -131,52 +172,74 @@ static void log_request(const char* method, const char* url, int status, double 
 #endif
 
 static void alloc_buffer_c(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf) {
+    (void)handle;
     buf->base = (char*)malloc(suggested_size);
     buf->len = suggested_size;
 }
 
 static void on_close_c(uv_handle_t* handle) {
-    free(handle);
+    client_ctx_t* ctx = (client_ctx_t*)handle->data;
+    if (ctx != NULL) {
+        buf_free(&ctx->url);
+        buf_free(&ctx->headers);
+        buf_free(&ctx->body);
+        free(ctx);
+    } else {
+        free(handle);
+    }
 }
 
 static void on_write_close_c(uv_write_t* req, int status) {
+    (void)status;
     write_req_t* wr = (write_req_t*)req;
     if (wr->data != NULL) free(wr->data);
-    if (wr->client != NULL) uv_close((uv_handle_t*)wr->client, on_close_c);
+    if (wr->client != NULL && !uv_is_closing((uv_handle_t*)wr->client)) {
+        uv_close((uv_handle_t*)wr->client, on_close_c);
+    }
     free(wr);
 }
 
 static void on_write_keep_alive_c(uv_write_t* req, int status) {
     write_req_t* wr = (write_req_t*)req;
     if (wr->data != NULL) free(wr->data);
-    if (status != 0 && wr->client != NULL) {
+    if (status != 0 && wr->client != NULL && !uv_is_closing((uv_handle_t*)wr->client)) {
         uv_close((uv_handle_t*)wr->client, on_close_c);
     }
     free(wr);
 }
 
-static inline void send_response(uv_tcp_t* client, const char* response, int keep_alive) {
-    if (response == NULL) response = http_500;
+static inline void send_response(uv_tcp_t* client, char* response, int keep_alive, int is_allocated) {
+    if (client == NULL || uv_is_closing((uv_handle_t*)client)) {
+        if (is_allocated && response != NULL) free(response);
+        return;
+    }
+
+    if (response == NULL) {
+        response = (char*)http_500;
+        is_allocated = 0;
+    }
 
     size_t len = strlen(response);
     write_req_t* wr = (write_req_t*)malloc(sizeof(write_req_t));
     if (!wr) {
-        uv_close((uv_handle_t*)client, on_close_c);
+        if (is_allocated && response != NULL) free(response);
+        if (!uv_is_closing((uv_handle_t*)client)) {
+            uv_close((uv_handle_t*)client, on_close_c);
+        }
         return;
     }
 
-    wr->data = (char*)malloc(len + 1);
-    if (!wr->data) {
-        free(wr);
-        uv_close((uv_handle_t*)client, on_close_c);
-        return;
-    }
-
-    memcpy(wr->data, response, len + 1);
-    wr->len = len;
     wr->client = client;
+    if (is_allocated) {
+        // Zero-duplicate transfer from Mojo: take ownership directly
+        wr->data = response;
+        wr->len = len;
+    } else {
+        wr->data = strdup(response);
+        wr->len = len;
+    }
 
-    uv_buf_t buf = uv_buf_init(wr->data, len);
+    uv_buf_t buf = uv_buf_init(wr->data, (unsigned int)wr->len);
 
     if (keep_alive) {
         uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_keep_alive_c);
@@ -197,111 +260,153 @@ static int extract_status_from_response(const char* response) {
     return status > 0 ? status : 200;
 }
 
+static int on_message_begin_c(llhttp_t* parser) {
+    client_ctx_t* ctx = (client_ctx_t*)parser->data;
+    buf_reset(&ctx->url);
+    buf_reset(&ctx->headers);
+    buf_reset(&ctx->body);
+    ctx->header_state = HEADER_STATE_NONE;
+    return 0;
+}
+
 static int on_url_c(llhttp_t* parser, const char* at, size_t length) {
-    http_parser_t* http = (http_parser_t*)parser->data;
-    if (http->url != NULL) free(http->url);
-    http->url = (char*)malloc(length + 1);
-    if (!http->url) return -1;
-    memcpy(http->url, at, length);
-    http->url[length] = '\0';
+    client_ctx_t* ctx = (client_ctx_t*)parser->data;
+    return buf_append(&ctx->url, at, length);
+}
+
+static int on_header_field_c(llhttp_t* parser, const char* at, size_t length) {
+    client_ctx_t* ctx = (client_ctx_t*)parser->data;
+    if (ctx->header_state == HEADER_STATE_VALUE) {
+        buf_append(&ctx->headers, "\r\n", 2);
+    }
+    ctx->header_state = HEADER_STATE_FIELD;
+    return buf_append(&ctx->headers, at, length);
+}
+
+static int on_header_value_c(llhttp_t* parser, const char* at, size_t length) {
+    client_ctx_t* ctx = (client_ctx_t*)parser->data;
+    if (ctx->header_state == HEADER_STATE_FIELD) {
+        buf_append(&ctx->headers, ": ", 2);
+    }
+    ctx->header_state = HEADER_STATE_VALUE;
+    return buf_append(&ctx->headers, at, length);
+}
+
+static int on_headers_complete_c(llhttp_t* parser) {
+    client_ctx_t* ctx = (client_ctx_t*)parser->data;
+    if (ctx->header_state == HEADER_STATE_VALUE) {
+        buf_append(&ctx->headers, "\r\n", 2);
+    }
+    ctx->header_state = HEADER_STATE_NONE;
+    ctx->keep_alive = llhttp_should_keep_alive(parser);
     return 0;
 }
 
 static int on_body_c(llhttp_t* parser, const char* at, size_t length) {
-    http_parser_t* http = (http_parser_t*)parser->data;
-    if (http->body != NULL) free(http->body);
-    http->body = (char*)malloc(length + 1);
-    if (!http->body) return -1;
-    memcpy(http->body, at, length);
-    http->body[length] = '\0';
-    http->body_len = length;
-    return 0;
+    client_ctx_t* ctx = (client_ctx_t*)parser->data;
+    return buf_append(&ctx->body, at, length);
 }
 
-static int on_headers_complete_c(llhttp_t* parser) {
-    http_parser_t* http = (http_parser_t*)parser->data;
-    http->headers_complete = 1;
-    http->status_code = parser->status_code;
-    return 0;
-}
-
-static inline void handle_request(uv_tcp_t* client, const char* data, size_t len) {
-    if (global_router == NULL) {
-        send_response(client, http_500, 0);
-        return;
+static int on_message_complete_c(llhttp_t* parser) {
+    client_ctx_t* ctx = (client_ctx_t*)parser->data;
+    void* router = ctx->router ? ctx->router : global_router;
+    if (router == NULL) {
+        send_response(&ctx->client, (char*)http_500, 0, 0);
+        return 0;
     }
 
     request_count++;
 
-    http_parser_t* http = (http_parser_t*)malloc(sizeof(http_parser_t));
-    if (!http) {
-        send_response(client, http_500, 0);
-        return;
-    }
-    memset(http, 0, sizeof(http_parser_t));
-
-    llhttp_settings_init(&http->settings);
-    http->settings.on_url = on_url_c;
-    http->settings.on_headers_complete = on_headers_complete_c;
-    http->settings.on_body = on_body_c;
-
-    llhttp_init(&http->parser, HTTP_REQUEST, &http->settings);
-    http->parser.data = http;
-
-    llhttp_execute(&http->parser, data, len);
-
-    const char* method = llhttp_method_name(http->parser.method);
-    const char* url = http->url ? http->url : "";
-    const char* body = http->body ? http->body : "";
+    const char* method = llhttp_method_name(parser->method);
+    const char* url = ctx->url.data ? ctx->url.data : "";
+    const char* headers = ctx->headers.data ? ctx->headers.data : "";
+    const char* body = ctx->body.data ? ctx->body.data : "";
 
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
 
-    char* response = mojo_handler(global_router, url, method, body);
+    char* response = mojo_handler(router, url, method, headers, body);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     double duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
-    (end.tv_nsec - start.tv_nsec) / 1000000.0;
+                         (end.tv_nsec - start.tv_nsec) / 1000000.0;
 
     int status = 500;
     if (response != NULL) {
         status = extract_status_from_response(response);
     }
 
-    send_response(client, response ? response : http_500, 1);
-
-    if (response != NULL) free(response);
+    int keep_alive = ctx->keep_alive;
+    if (response != NULL) {
+        send_response(&ctx->client, response, keep_alive, 1);
+    } else {
+        send_response(&ctx->client, (char*)http_500, 0, 0);
+    }
 
     log_request(method, url, status, duration_ms);
-
-    if (http->url != NULL) free(http->url);
-    if (http->body != NULL) free(http->body);
-    free(http);
+    return 0;
 }
 
 static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
+    client_ctx_t* ctx = (client_ctx_t*)client->data;
     if (nread > 0) {
-        handle_request((uv_tcp_t*)client, buf->base, nread);
+        if (ctx != NULL) {
+            enum llhttp_errno err = llhttp_execute(&ctx->parser, buf->base, nread);
+            if (err != HPE_OK) {
+                send_response((uv_tcp_t*)client, (char*)http_400, 0, 0);
+            }
+        }
     } else if (nread < 0) {
-        uv_close((uv_handle_t*)client, on_close_c);
+        if (!uv_is_closing((uv_handle_t*)client)) {
+            uv_close((uv_handle_t*)client, on_close_c);
+        }
     }
     if (buf->base != NULL) free(buf->base);
 }
 
 static void on_connection_c(uv_stream_t* server, int status) {
-    uv_tcp_t* client = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
-    if (!client) return;
-    uv_tcp_init(server->loop, client);
+    if (status < 0) return;
+
+    client_ctx_t* ctx = (client_ctx_t*)malloc(sizeof(client_ctx_t));
+    if (!ctx) return;
+    memset(ctx, 0, sizeof(client_ctx_t));
+
+    uv_tcp_init(server->loop, &ctx->client);
+    ctx->client.data = ctx;
+
+    thread_args_t* targs = (thread_args_t*)server->data;
+    if (targs) {
+        ctx->router = targs->router;
+    } else {
+        ctx->router = global_router;
+    }
+
+    buf_init(&ctx->url);
+    buf_init(&ctx->headers);
+    buf_init(&ctx->body);
+    ctx->header_state = HEADER_STATE_NONE;
+
+    llhttp_settings_init(&ctx->settings);
+    ctx->settings.on_message_begin = on_message_begin_c;
+    ctx->settings.on_url = on_url_c;
+    ctx->settings.on_header_field = on_header_field_c;
+    ctx->settings.on_header_value = on_header_value_c;
+    ctx->settings.on_headers_complete = on_headers_complete_c;
+    ctx->settings.on_body = on_body_c;
+    ctx->settings.on_message_complete = on_message_complete_c;
+
+    llhttp_init(&ctx->parser, HTTP_REQUEST, &ctx->settings);
+    ctx->parser.data = ctx;
+
     int fd;
-    uv_fileno((uv_handle_t*)client, &fd);
+    uv_fileno((uv_handle_t*)&ctx->client, &fd);
     int nodelay = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
-    if (uv_accept(server, (uv_stream_t*)client) == 0) {
-        uv_read_start((uv_stream_t*)client, alloc_buffer_c, on_read_c);
+    if (uv_accept(server, (uv_stream_t*)&ctx->client) == 0) {
+        uv_read_start((uv_stream_t*)&ctx->client, alloc_buffer_c, on_read_c);
     } else {
-        uv_close((uv_handle_t*)client, NULL);
-        free(client);
+        uv_close((uv_handle_t*)&ctx->client, on_close_c);
     }
 }
 
@@ -359,6 +464,7 @@ static void* thread_main(void* arg) {
 
     uv_tcp_t* server = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
     uv_tcp_init(loop, server);
+    server->data = args;
     uv_tcp_open(server, server_fd);
 
     uv_listen((uv_stream_t*)server, 1024, on_connection_c);
@@ -428,24 +534,30 @@ void uv_read_stop_wrapper(uv_tcp_t* client) {
 void uv_write_wrapper(uv_tcp_t* client, const char* data, size_t len) {
     write_req_t* wr = (write_req_t*)malloc(sizeof(write_req_t));
     if (!wr) {
-        uv_close((uv_handle_t*)client, on_close_c);
+        if (!uv_is_closing((uv_handle_t*)client)) {
+            uv_close((uv_handle_t*)client, on_close_c);
+        }
         return;
     }
     wr->data = (char*)malloc(len);
     if (!wr->data) {
         free(wr);
-        uv_close((uv_handle_t*)client, on_close_c);
+        if (!uv_is_closing((uv_handle_t*)client)) {
+            uv_close((uv_handle_t*)client, on_close_c);
+        }
         return;
     }
     memcpy(wr->data, data, len);
     wr->len = len;
     wr->client = client;
-    uv_buf_t buf = uv_buf_init(wr->data, len);
+    uv_buf_t buf = uv_buf_init(wr->data, (unsigned int)len);
     uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_close_c);
 }
 
 void uv_close_wrapper(uv_tcp_t* client) {
-    uv_close((uv_handle_t*)client, on_close_c);
+    if (!uv_is_closing((uv_handle_t*)client)) {
+        uv_close((uv_handle_t*)client, on_close_c);
+    }
 }
 
 uv_loop_t* uv_loop_create_wrapper() {
@@ -459,4 +571,8 @@ void uv_loop_destroy_wrapper(uv_loop_t* loop) {
     if (!loop) return;
     if (uv_loop_alive(loop)) uv_loop_close(loop);
     free(loop);
+}
+
+void mojelly_free_response(char* ptr) {
+    if (ptr) free(ptr);
 }

@@ -100,6 +100,8 @@ if [ "$NEED_REBUILD" = true ]; then
     gcc -c bridge.c -o bridge.o \
         -I/usr/include \
         -I/usr/include/llhttp \
+        -I/usr/local/include \
+        -I/usr/local/include/llhttp \
         -fPIC -pthread \
         -O3 -march=native -mtune=native -pipe \
         -funroll-loops -ffast-math
@@ -107,6 +109,7 @@ if [ "$NEED_REBUILD" = true ]; then
     gcc -c bridge_ssl.c -O3 -o bridge_ssl.o \
         -I/usr/include \
         -I/usr/include/openssl \
+        -I/usr/local/include \
         -fPIC \
         2>/dev/null || echo "⚠️ bridge_ssl.c not found or failed to compile"
 
@@ -136,6 +139,7 @@ if [ ! -f "build/app_generated.mojo" ]; then
 fi
 
 LINK_FLAGS="-Xlinker -L./lib \
+    -Xlinker -L/usr/local/lib \
     -Xlinker -lmojelly \
     -Xlinker -luv \
     -Xlinker -lllhttp \
