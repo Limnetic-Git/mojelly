@@ -39,7 +39,7 @@ fi
 
 # 2. C Syntax & Warnings as Errors
 echo -e "▶ Checking C source syntax and warnings..."
-if gcc -fsyntax-only -Wall -Wextra -Werror -pedantic src_c/bridge.c -I/usr/include -I/usr/include/llhttp; then
+if gcc -fsyntax-only -Wall -Wextra -Werror -pedantic src_c/bridge.c -I/usr/include -I/usr/include/llhttp -I/usr/local/include -I/usr/local/include/llhttp; then
     echo -e "${GREEN}✔ src_c/bridge.c passes strict C checks${NC}\n"
 else
     echo -e "${RED}✘ src_c/bridge.c has compiler warnings or syntax errors${NC}\n"

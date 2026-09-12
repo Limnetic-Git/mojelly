@@ -24,10 +24,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libuv1-dev \
-            libllhttp-dev \
             libssl-dev \
             gcc \
+            cmake \
             python3
+          git clone --depth 1 -b release/v9.4.3 https://github.com/nodejs/llhttp.git /tmp/llhttp
+          cmake -B /tmp/llhttp/build -S /tmp/llhttp -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          sudo cmake --install /tmp/llhttp/build
+          sudo ldconfig
 
       - name: Setup Pixi
         uses: prefix-dev/setup-pixi@v0.8.1
