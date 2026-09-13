@@ -3,6 +3,7 @@ from mojelly.http.response import HTTPResponse
 
 comptime Handler = def(HTTPRequest) thin -> HTTPResponse
 
+
 struct RouterHandlers:
     var handlers: Dict[String, Handler]
 
@@ -29,7 +30,8 @@ struct RouterHandlers:
         self.add("PATCH", path, handler)
 
     def handle(self, request: HTTPRequest) -> HTTPResponse:
-        var key = request.method + ":" + request.url
+        var match_path = request.path if request.path != "" else request.url
+        var key = request.method + ":" + match_path
         var handler = self.handlers.get(key)
         if handler:
             return handler.value()(request)
