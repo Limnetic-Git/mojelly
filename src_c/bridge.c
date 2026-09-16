@@ -455,12 +455,12 @@ static int on_message_complete_c(llhttp_t* parser) {
     double duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
                          (end.tv_nsec - start.tv_nsec) / 1000000.0;
 
-    //int status = 500;
+    int status = 500;
     int keep_alive = ctx->keep_alive;
 
     if (response != NULL) {
         if (resp_len == 0) resp_len = strlen(response);
-        //status = extract_status_from_response(response);
+        status = extract_status_from_response(response);
         send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
     } else {
         send_response(&ctx->client, http_500, strlen(http_500), 0,
