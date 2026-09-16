@@ -1,56 +1,55 @@
 #define _GNU_SOURCE
-#include <sched.h>
-
-#include <uv.h>
-#include <llhttp.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-#include <time.h>
+#include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
-#include <sys/socket.h>
+#include <llhttp.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <unistd.h>
 #include <pthread.h>
-#include <arpa/inet.h>
-#include <fcntl.h>
+#include <sched.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <time.h>
+#include <unistd.h>
+#include <uv.h>
 
-#define LOG_LEVEL 0
+#define LOG_LEVEL 1
 // 0 - Errors only (recommended for best performance)
 // 1 - Requests logs (recommended for default use)
 // 2 - All logs (use for debug only)
 
-#define LOG_COLORS 0
+#define LOG_COLORS 1
 // 0 - u are boring, but little bit faster
 // 1 - u are cool =)
 
 #define READ_BUFFER_SIZE 16384
 #define LISTEN_BACKLOG 1024
 #define HTTP_STATUS_DIGITS 3
-#define HTTP_VERSION_PREFIX_LEN 9 /* strlen("HTTP/1.1 ") */
+#define HTTP_VERSION_PREFIX_LEN 9        /* strlen("HTTP/1.1 ") */
 #define BODY_PRERESERVE_MAX (1ULL << 30) /* 1 GiB cap for pre-reserve */
 
 #if LOG_COLORS
-#define COLOR_RESET   "\033[0m"
-#define COLOR_GREEN   "\033[32m"
-#define COLOR_YELLOW  "\033[33m"
-#define COLOR_BLUE    "\033[34m"
+#define COLOR_RESET "\033[0m"
+#define COLOR_GREEN "\033[32m"
+#define COLOR_YELLOW "\033[33m"
+#define COLOR_BLUE "\033[34m"
 #define COLOR_MAGENTA "\033[35m"
-#define COLOR_CYAN    "\033[36m"
-#define COLOR_RED     "\033[31m"
-#define COLOR_BOLD    "\033[1m"
+#define COLOR_CYAN "\033[36m"
+#define COLOR_RED "\033[31m"
+#define COLOR_BOLD "\033[1m"
 #else
-#define COLOR_RESET   ""
-#define COLOR_GREEN   ""
-#define COLOR_YELLOW  ""
-#define COLOR_BLUE    ""
+#define COLOR_RESET ""
+#define COLOR_GREEN ""
+#define COLOR_YELLOW ""
+#define COLOR_BLUE ""
 #define COLOR_MAGENTA ""
-#define COLOR_CYAN    ""
-#define COLOR_RED     ""
-#define COLOR_BOLD    ""
+#define COLOR_CYAN ""
+#define COLOR_RED ""
+#define COLOR_BOLD ""
 #endif
 
 static _Thread_local int current_thread_id = -1;
@@ -64,18 +63,16 @@ static _Thread_local unsigned long request_count = 0;
  *                      until the next request on this connection is
  *                      fully processed. Server must NOT free() it.
  */
-#define MOJO_RESP_OWNED    0
+#define MOJO_RESP_OWNED 0
 #define MOJO_RESP_BORROWED 1
 
 extern char* mojo_handler(void* router, const char* url, const char* method,
-                          const char* headers, const char* body, size_t* out_len,
-                          int* out_ownership);
+                          const char* headers, const char* body,
+                          size_t* out_len, int* out_ownership);
 
 static void* global_router = NULL;
 
-void mojelly_set_router(void* router) {
-    global_router = router;
-}
+void mojelly_set_router(void* router) { global_router = router; }
 
 /* ---------- buffer ---------- */
 
@@ -172,20 +169,20 @@ typedef struct {
     buffer_t url;
     buffer_t headers;
     buffer_t body;
-    buffer_t pending;      /* accumulates data while processing is busy */
+    buffer_t pending; /* accumulates data while processing is busy */
     header_state_t header_state;
     int keep_alive;
-    int processing;        /* 1 while a response write is in flight */
+    int processing; /* 1 while a response write is in flight */
     void* router;
 } client_ctx_t;
 
 typedef struct {
     uv_write_t req;
     uv_tcp_t* client;
-    char* data;      /* owned or borrowed */
+    char* data; /* owned or borrowed */
     size_t len;
     int keep_alive;
-    int free_data;   /* 1 -> free(data) in finish_write */
+    int free_data; /* 1 -> free(data) in finish_write */
 } write_req_t;
 
 typedef struct {
@@ -195,14 +192,14 @@ typedef struct {
 } thread_args_t;
 
 static const char* http_500 =
-"HTTP/1.1 500 Internal Server Error\r\n"
-"Content-Length: 0\r\n"
-"Connection: close\r\n\r\n";
+    "HTTP/1.1 500 Internal Server Error\r\n"
+    "Content-Length: 0\r\n"
+    "Connection: close\r\n\r\n";
 
 static const char* http_400 =
-"HTTP/1.1 400 Bad Request\r\n"
-"Content-Length: 0\r\n"
-"Connection: close\r\n\r\n";
+    "HTTP/1.1 400 Bad Request\r\n"
+    "Content-Length: 0\r\n"
+    "Connection: close\r\n\r\n";
 
 #if LOG_LEVEL >= 1
 static const char* get_method_color(const char* method) {
@@ -222,7 +219,8 @@ static const char* get_status_color(int status) {
     return COLOR_RESET;
 }
 
-static void log_request(const char* method, const char* url, int status, double duration_ms) {
+static void log_request(const char* method, const char* url, int status,
+                        double duration_ms) {
     const char* method_color = get_method_color(method);
     const char* status_color = get_status_color(status);
 
@@ -232,12 +230,9 @@ static void log_request(const char* method, const char* url, int status, double 
     char time_str[20];
     strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_info);
 
-    printf("[%s] [T%d] %s%s%s %s%s%s %s%d%s %.2fms\n",
-           time_str, current_thread_id,
-           method_color, method, COLOR_RESET,
-           COLOR_BOLD, url, COLOR_RESET,
-           status_color, status, COLOR_RESET,
-           duration_ms);
+    printf("[%s] [T%d] %s%s%s %s%s%s %s%d%s %.2fms\n", time_str,
+           current_thread_id, method_color, method, COLOR_RESET, COLOR_BOLD,
+           url, COLOR_RESET, status_color, status, COLOR_RESET, duration_ms);
 }
 #else
 #define log_request(method, url, status, duration_ms) ((void)0)
@@ -360,8 +355,9 @@ static void send_response(uv_tcp_t* client, const char* response, size_t len,
 static int extract_status_from_response(const char* response) {
     if (response == NULL) return 500;
     /* strncmp is safe for short responses (stops at '\0'). memcmp would
-    * read past the end if response is shorter than HTTP_VERSION_PREFIX_LEN. */
-    if (strncmp(response, "HTTP/1.1 ", HTTP_VERSION_PREFIX_LEN) != 0) return 200;
+     * read past the end if response is shorter than HTTP_VERSION_PREFIX_LEN. */
+    if (strncmp(response, "HTTP/1.1 ", HTTP_VERSION_PREFIX_LEN) != 0)
+        return 200;
     int status = 0;
     int i = HTTP_VERSION_PREFIX_LEN;
     int end = HTTP_VERSION_PREFIX_LEN + HTTP_STATUS_DIGITS;
@@ -433,7 +429,7 @@ static int on_message_complete_c(llhttp_t* parser) {
 
     if (router == NULL) {
         send_response(&ctx->client, http_500, strlen(http_500), 0,
-                    MOJO_RESP_OWNED);
+                      MOJO_RESP_OWNED);
         return 0;
     }
 
@@ -452,23 +448,23 @@ static int on_message_complete_c(llhttp_t* parser) {
 
     size_t resp_len = 0;
     int resp_owned = MOJO_RESP_OWNED;
-    char* response = mojo_handler(router, url, method, headers, body,
-                                &resp_len, &resp_owned);
+    char* response = mojo_handler(router, url, method, headers, body, &resp_len,
+                                  &resp_owned);
 
     clock_gettime(CLOCK_MONOTONIC, &end);
     double duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
-    (end.tv_nsec - start.tv_nsec) / 1000000.0;
+                         (end.tv_nsec - start.tv_nsec) / 1000000.0;
 
-    int status = 500;
+    //int status = 500;
     int keep_alive = ctx->keep_alive;
 
     if (response != NULL) {
         if (resp_len == 0) resp_len = strlen(response);
-        status = extract_status_from_response(response);
+        //status = extract_status_from_response(response);
         send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
     } else {
         send_response(&ctx->client, http_500, strlen(http_500), 0,
-                    MOJO_RESP_OWNED);
+                      MOJO_RESP_OWNED);
     }
 
     log_request(method, url, status, duration_ms);
@@ -477,7 +473,8 @@ static int on_message_complete_c(llhttp_t* parser) {
 
 /* ---------- connection ---------- */
 
-static void alloc_buffer_c(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf) {
+static void alloc_buffer_c(uv_handle_t* handle, size_t suggested_size,
+                           uv_buf_t* buf) {
     (void)handle;
     (void)suggested_size;
     buf->base = (char*)malloc(READ_BUFFER_SIZE);
@@ -492,15 +489,15 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
                 /* Parser is busy — accumulate for later. OOM -> 500 & close. */
                 if (buf_append(&ctx->pending, buf->base, (size_t)nread) != 0) {
                     send_response((uv_tcp_t*)client, http_500, strlen(http_500),
-                                0, MOJO_RESP_OWNED);
+                                  0, MOJO_RESP_OWNED);
                 }
             } else {
                 enum llhttp_errno err =
-                llhttp_execute(&ctx->parser, buf->base, (size_t)nread);
+                    llhttp_execute(&ctx->parser, buf->base, (size_t)nread);
                 if (err != HPE_OK) {
                     /* keep_alive = 0 -> connection will be closed. */
                     send_response((uv_tcp_t*)client, http_400, strlen(http_400),
-                                0, MOJO_RESP_OWNED);
+                                  0, MOJO_RESP_OWNED);
                 }
             }
         }
@@ -549,7 +546,8 @@ static void on_connection_c(uv_stream_t* server, int status) {
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
     }
 
-    if (uv_read_start((uv_stream_t*)&ctx->client, alloc_buffer_c, on_read_c) != 0) {
+    if (uv_read_start((uv_stream_t*)&ctx->client, alloc_buffer_c, on_read_c) !=
+        0) {
         uv_close((uv_handle_t*)&ctx->client, on_close_c);
     }
 }
@@ -562,9 +560,9 @@ static int create_bound_socket(int port) {
 
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    #ifdef SO_REUSEPORT
+#ifdef SO_REUSEPORT
     setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-    #endif
+#endif
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -573,7 +571,8 @@ static int create_bound_socket(int port) {
     addr.sin_port = htons((uint16_t)port);
 
     if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "[C] ❌ bind port %d failed: %s\n", port, strerror(errno));
+        fprintf(stderr, "[C] ❌ bind port %d failed: %s\n", port,
+                strerror(errno));
         close(fd);
         return -1;
     }
@@ -657,8 +656,8 @@ static void* thread_main(void* arg) {
         return NULL;
     }
 
-    printf("[C] 🧵 Thread %d listening on CPU %d (port %d)\n",
-            args->thread_id, cpu_id, args->port);
+    printf("[C] 🧵 Thread %d listening on CPU %d (port %d)\n", args->thread_id,
+           cpu_id, args->port);
     fflush(stdout);
 
     uv_run(loop, UV_RUN_DEFAULT);
@@ -698,9 +697,7 @@ void pthread_create_wrapper(int port, void* router, int num_threads) {
     fflush(stdout);
 }
 
-void mojelly_ensure_init(void) {
-    ensure_settings_init();
-}
+void mojelly_ensure_init(void) { ensure_settings_init(); }
 
 /* ---------- low-level wrappers (single-loop usage) ---------- */
 
@@ -716,9 +713,9 @@ void uv_tcp_bind_wrapper(uv_tcp_t* tcp, const char* ip, int port) {
     uv_ip4_addr(ip, port, &addr);
 
     unsigned int flags = 0;
-    #ifdef UV_TCP_REUSEPORT
+#ifdef UV_TCP_REUSEPORT
     flags |= UV_TCP_REUSEPORT;
-    #endif
+#endif
     int rc = uv_tcp_bind(tcp, (const struct sockaddr*)&addr, flags);
     if (rc != 0) {
         fprintf(stderr, "[C] ❌ uv_tcp_bind failed: %s\n", uv_strerror(rc));
