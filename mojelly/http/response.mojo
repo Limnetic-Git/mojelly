@@ -3,12 +3,14 @@ struct HTTPResponse:
     var body: String
     var content_type: String
     var headers: Dict[String, String]
+    var cookies: List[String]
 
     def __init__(out self, status: Int32 = 200, body: String = ""):
         self.status = status
         self.body = body
         self.content_type = "text/plain"
         self.headers = Dict[String, String]()
+        self.cookies = List[String]()
 
     def set_json(mut self):
         self.content_type = "application/json"
@@ -25,6 +27,30 @@ struct HTTPResponse:
     def set_header(mut self, name: String, value: String):
         self.headers[name] = value
 
+    def set_cookie(
+        mut self,
+        name: String,
+        value: String,
+        path: String = "/",
+        max_age: Int = 0,
+        http_only: Bool = True,
+        secure: Bool = False,
+        same_site: String = "Lax",
+    ):
+        var cookie = name + "=" + value
+        cookie += "; Path=" + path
+        if max_age > 0:
+            cookie += "; Max-Age=" + String(max_age)
+        if http_only:
+            cookie += "; HttpOnly"
+        if secure:
+            cookie += "; Secure"
+        if same_site != "":
+            cookie += "; SameSite=" + same_site
+        self.cookies.append(cookie)
+
+    def delete_cookie(mut self, name: String, path: String = "/"):
+        self.set_cookie(name, "", path=path, max_age=0)
 
 def get_status_phrase(status: Int32) -> String:
     if status == 200:

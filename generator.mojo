@@ -698,6 +698,16 @@ def mojo_handler(
                 var val = String(line[byte=colon + 1:len(line.as_bytes())]).strip()
                 request.headers[String(key)] = String(val)
 
+    var cookie_header = request.headers.get("Cookie", "")
+    if cookie_header != "":
+        for cookie_span in cookie_header.split(";"):
+            var cookie = String(cookie_span).strip()
+            var eq = cookie.find("=")
+            if eq != -1:
+                var name = String(cookie[byte=0:eq]).strip()
+                var value = String(cookie[byte=eq + 1:len(cookie.as_bytes())]).strip()
+                request.cookies[name] = value
+
     var router_response = router[].handle(request)
 
     var body_len = router_response.body.byte_length()
@@ -712,7 +722,8 @@ def mojo_handler(
     for header_key in router_response.headers.keys():
         var val = router_response.headers.get(header_key, "")
         http_response += header_key + ": " + val + "\\r\\n"
-
+    for cookie in router_response.cookies:
+        http_response += "Set-Cookie: " + cookie + "\\r\\n"
     http_response += "\\r\\n"
     http_response += router_response.body
 
