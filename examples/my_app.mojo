@@ -53,6 +53,52 @@ def query_test(req: HTTPRequest) -> HTTPResponse:
         200, "Path: " + req.path + ", Query: " + req.query_string
     )
 
+# Set cookie
+def cookie_set_handler(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, "Cookies set!\nGo to /cookies/read")
+    resp.set_cookie(
+        "session",
+        "abc123xyz",
+        max_age=3600,
+        http_only=True,
+        same_site="Lax",
+    )
+    resp.set_cookie(
+        "theme",
+        "dark",
+        max_age=86400,
+        http_only=False,
+        same_site="Lax",
+    )
+    return resp^
+
+# Get cookie
+def cookie_read_handler(req: HTTPRequest) -> HTTPResponse:
+    var session = req.get_cookie("session")
+    var theme = req.get_cookie("theme")
+
+    var body = String()
+    body += "Cookie values:\n"
+    body += "  session = "
+    if session == "":
+        body += "(not set)"
+    else:
+        body += session
+    body += "\n  theme = "
+    if theme == "":
+        body += "(not set)"
+    else:
+        body += theme
+
+    var resp = HTTPResponse(200, body)
+    return resp^
+
+# Delete cookie
+def cookie_delete_handler(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, "🗑️ Cookies deleted!")
+    resp.delete_cookie("session")
+    resp.delete_cookie("theme")
+    return resp^
 
 def main():
     var router = RouterHandlers()
@@ -64,6 +110,10 @@ def main():
     router.get("/headers", headers_test)
     router.get("/query", query_test)
     router.post("/user", dto_validation_test)
+
+    router.get("/cookies/set", cookie_set_handler)
+    router.get("/cookies/read", cookie_read_handler)
+    router.get("/cookies/delete", cookie_delete_handler)
 
     var server = HTTPServer(router)
     server.listen(8080)

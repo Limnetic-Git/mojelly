@@ -663,6 +663,8 @@ def string_to_c_string(s: String) -> C_UInt8:
     ptr.unsafe_offset(len).unsafe_write(0)
     return ptr
 
+
+
 # ============================================================
 # EXPORTING FUNC
 # ============================================================
@@ -704,8 +706,14 @@ def mojo_handler(
             var cookie = String(cookie_span).strip()
             var eq = cookie.find("=")
             if eq != -1:
-                var name = String(cookie[byte=0:eq]).strip()
-                var value = String(cookie[byte=eq + 1:len(cookie.as_bytes())]).strip()
+                var name_span = cookie[byte=0:eq].strip()
+                var value_span = cookie[byte=eq + 1:len(cookie.as_bytes())].strip()
+                var name = String()
+                for i in range(len(name_span.as_bytes())):
+                    name += chr(Int(name_span.as_bytes()[i]))
+                var value = String()
+                for i in range(len(value_span.as_bytes())):
+                    value += chr(Int(value_span.as_bytes()[i]))
                 request.cookies[name] = value
 
     var router_response = router[].handle(request)
