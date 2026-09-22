@@ -52,6 +52,7 @@ struct HTTPResponse:
     def delete_cookie(mut self, name: String, path: String = "/"):
         self.set_cookie(name, "", path=path, max_age=0)
 
+
 def get_status_phrase(status: Int32) -> String:
     if status == 200:
         return "OK"

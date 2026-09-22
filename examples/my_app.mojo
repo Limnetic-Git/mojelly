@@ -53,6 +53,7 @@ def query_test(req: HTTPRequest) -> HTTPResponse:
         200, "Path: " + req.path + ", Query: " + req.query_string
     )
 
+
 # Set cookie
 def cookie_set_handler(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, "Cookies set!\nGo to /cookies/read")
@@ -71,6 +72,7 @@ def cookie_set_handler(req: HTTPRequest) -> HTTPResponse:
         same_site="Lax",
     )
     return resp^
+
 
 # Get cookie
 def cookie_read_handler(req: HTTPRequest) -> HTTPResponse:
@@ -93,12 +95,14 @@ def cookie_read_handler(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, body)
     return resp^
 
+
 # Delete cookie
 def cookie_delete_handler(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, "🗑️ Cookies deleted!")
     resp.delete_cookie("session")
     resp.delete_cookie("theme")
     return resp^
+
 
 def main():
     var router = RouterHandlers()
