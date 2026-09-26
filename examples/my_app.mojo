@@ -103,6 +103,29 @@ def cookie_delete_handler(req: HTTPRequest) -> HTTPResponse:
     resp.delete_cookie("theme")
     return resp^
 
+def user_handler(req: HTTPRequest) -> HTTPResponse:
+    var user_id = req.get_param("id")
+    if user_id == "":
+        return HTTPResponse(400, "Missing id")^
+    return HTTPResponse(200, "User ID: " + user_id)^
+
+
+def profile_handler(req: HTTPRequest) -> HTTPResponse:
+    var login = req.get_param("login")
+    return HTTPResponse(200, "Profile of " + login)^
+
+
+def post_handler(req: HTTPRequest) -> HTTPResponse:
+    var user_id = req.get_param("id")
+    var post_id = req.get_param("post_id")
+    return HTTPResponse(200, "Post " + post_id + " by user " + user_id)^
+
+
+def move_page_handler(req: HTTPRequest) -> HTTPResponse:
+    var page_id = req.get_param("page_id")
+    var move_to = req.get_param("move_to")
+    return HTTPResponse(200, "Move page " + page_id + " to " + move_to)^
+
 
 def main():
     var router = RouterHandlers()
@@ -118,6 +141,11 @@ def main():
     router.get("/cookies/set", cookie_set_handler)
     router.get("/cookies/read", cookie_read_handler)
     router.get("/cookies/delete", cookie_delete_handler)
+
+    router.get("/user/:id", user_handler)
+    router.get("/user/:login/profile", profile_handler)
+    router.get("/user/:id/posts/:post_id", post_handler)
+    router.post("/move-page/:page_id/:move_to", move_page_handler)
 
     var server = HTTPServer(router)
     server.listen(8080)

@@ -4,7 +4,7 @@
 from std.os import mkdir
 from std.memory.alloc import alloc, dealloc, Layout
 
-comptime USE_MULTITHREAD: Bool = True  # U can turn it off, but its not recommended =)
+comptime USE_MULTITHREAD: Bool = True
 
 
 def read_user_file(path: String) -> Optional[String]:
@@ -469,9 +469,9 @@ def generate_routes_code(
 
     for i in range(len(keys)):
         var key = keys[i]
-        var parts = key.split(":")
-        var method = String(parts[0])
-        var path = String(parts[1])
+        var colon = key.find(":")
+        var method = String(key[byte=0:colon])
+        var path = String(key[byte=colon+1:len(key.as_bytes())])
         var handler = routes.get(key, "")
         if handler != "":
             var registered_handler = handler
