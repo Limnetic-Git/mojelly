@@ -1,4 +1,6 @@
+build/
 /build
+lib/
 /lib
 server
 __pycache__/

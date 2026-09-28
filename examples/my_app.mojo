@@ -3,7 +3,7 @@ from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
 from dto import UserDTO
 from test_html_page import test_html_page, test_css
-from test_handlers import *  # dto_validation_test, user_handler
+from test_handlers import dto_validation_test, user_handler
 
 
 # Hello world plain text response
@@ -40,6 +40,14 @@ def css_test(req: HTTPRequest) -> HTTPResponse:
 #        return HTTPResponse(200, dto.nickname + "is not adult")
 
 
+# With DTO validation from Query String (FastAPI style)
+def get_user_dto_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+    if dto.age >= 18:
+        return HTTPResponse(200, dto.nickname + " is adult (GET)")
+    else:
+        return HTTPResponse(200, dto.nickname + " is minor (GET)")
+
+
 # Echo request header and set response header
 def headers_test(req: HTTPRequest) -> HTTPResponse:
     var incoming = req.get_header("X-Test-Request")
@@ -53,6 +61,13 @@ def query_test(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(
         200, "Path: " + req.path + ", Query: " + req.query_string
     )
+
+
+# Read query dictionary
+def query_dict_test(req: HTTPRequest) -> HTTPResponse:
+    var name = req.get_query("name", "Guest")
+    var page = req.get_query("page", "1")
+    return HTTPResponse(200, "Hello " + name + ", page " + page)
 
 
 # Set cookie
@@ -105,6 +120,7 @@ def cookie_delete_handler(req: HTTPRequest) -> HTTPResponse:
     return resp^
 
 
+# Some path-params handlers:
 def profile_handler(req: HTTPRequest) -> HTTPResponse:
     var login = req.get_param("login")
     var resp = HTTPResponse(200, "Profile of " + login)
@@ -134,7 +150,9 @@ def main():
     router.get("/style.css", css_test)
     router.get("/headers", headers_test)
     router.get("/query", query_test)
+    router.get("/query/dict", query_dict_test)
     router.post("/user", dto_validation_test)
+    router.get("/user/query", get_user_dto_test)
 
     router.get("/cookies/set", cookie_set_handler)
     router.get("/cookies/read", cookie_read_handler)
