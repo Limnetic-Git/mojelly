@@ -448,10 +448,16 @@ def generate_dto_wrappers_code(
         var wrapper = generated_dto_wrapper_name(handler)
         code += "def " + wrapper + "(req: HTTPRequest) -> HTTPResponse:\n"
         code += (
-            "    var dto_opt = try_deserialize[" + dto_type + "](req.body)\n"
+            '    var payload = req.query.to_json() if req.method == "GET"'
+            " else req.body\n"
         )
+        code += "    var dto_opt = try_deserialize[" + dto_type + "](payload)\n"
         code += "    if not dto_opt:\n"
-        code += '        return HTTPResponse(400, "Invalid JSON body")\n'
+        code += (
+            '        var err_msg = "Invalid query parameters" if req.method =='
+            ' "GET" else "Invalid JSON body"\n'
+        )
+        code += "        return HTTPResponse(400, err_msg)\n"
         code += "    var dto = dto_opt.take()\n"
         code += "    return " + handler + "(req, dto^)\n\n"
         generated[handler] = wrapper

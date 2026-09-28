@@ -31,12 +31,20 @@ def css_test(req: HTTPRequest) -> HTTPResponse:
     return resp^
 
 
-# With DTO validation
+# With DTO validation (POST body)
 def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
     if dto.age >= 18:
         return HTTPResponse(200, dto.nickname + "is adult")
     else:
         return HTTPResponse(200, dto.nickname + "is not adult")
+
+
+# With DTO validation from Query String (FastAPI style)
+def get_user_dto_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+    if dto.age >= 18:
+        return HTTPResponse(200, dto.nickname + " is adult (GET)")
+    else:
+        return HTTPResponse(200, dto.nickname + " is minor (GET)")
 
 
 # Echo request header and set response header
@@ -52,6 +60,13 @@ def query_test(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(
         200, "Path: " + req.path + ", Query: " + req.query_string
     )
+
+
+# Read query dictionary
+def query_dict_test(req: HTTPRequest) -> HTTPResponse:
+    var name = req.get_query("name", "Guest")
+    var page = req.get_query("page", "1")
+    return HTTPResponse(200, "Hello " + name + ", page " + page)
 
 
 # Set cookie
@@ -113,7 +128,9 @@ def main():
     router.get("/style.css", css_test)
     router.get("/headers", headers_test)
     router.get("/query", query_test)
+    router.get("/query/dict", query_dict_test)
     router.post("/user", dto_validation_test)
+    router.get("/user/query", get_user_dto_test)
 
     router.get("/cookies/set", cookie_set_handler)
     router.get("/cookies/read", cookie_read_handler)
