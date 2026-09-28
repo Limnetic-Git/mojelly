@@ -46,9 +46,9 @@ struct CompiledPattern:
         self.method = method^
 
 
-def split_segments(url: String) -> List[Tuple[Int, Int]]:
+def split_segments(path: String) -> List[Tuple[Int, Int]]:
     var result = List[Tuple[Int, Int]]()
-    var bytes = url.as_bytes()
+    var bytes = path.as_bytes()
     var n = len(bytes)
     var i = 0
 
@@ -116,10 +116,10 @@ def compile_pattern(
 
 def match_compiled(
     cp: CompiledPattern,
-    url: String,
+    path: String,
     url_segs: List[Tuple[Int, Int]],
 ) -> Optional[Dict[String, String]]:
-    var bytes = url.as_bytes()
+    var bytes = path.as_bytes()
     var total = len(bytes)
     var n = cp.num_segments
     var url_n = len(url_segs)
@@ -178,11 +178,11 @@ struct RouterHandlers:
         bucket[path] = handler
 
     def _lookup_exact(
-        self, method: String, url: String
+        self, method: String, path: String
     ) raises -> Optional[Handler]:
         ref bucket = self.exact[method]
-        if url in bucket:
-            return bucket[url]
+        if path in bucket:
+            return bucket[path]
         return None
 
     def add(mut self, var method: String, var path: String, handler: Handler):
@@ -216,17 +216,16 @@ struct RouterHandlers:
 
     def handle(self, mut request: HTTPRequest) -> HTTPResponse:
         var method = request.method
-        var url = request.url
-
+        var path = request.path
         if method in self.exact:
             try:
-                var h = self._lookup_exact(method, url)
+                var h = self._lookup_exact(method, path)
                 if h:
                     return h.value()(request)
             except:
                 pass
 
-        var url_segs = split_segments(url)
+        var url_segs = split_segments(path)
         var n = len(url_segs)
 
         for i in range(len(self.patterns)):
@@ -241,7 +240,7 @@ struct RouterHandlers:
                 if cp.num_segments != n:
                     continue
 
-            var params = match_compiled(cp, url, url_segs)
+            var params = match_compiled(cp, path, url_segs)
             if params:
                 request.params = params.take()
                 return cp.handler(request)
