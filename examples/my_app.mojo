@@ -31,12 +31,20 @@ def css_test(req: HTTPRequest) -> HTTPResponse:
     return resp^
 
 
-# With DTO validation
+# With DTO validation (POST body)
 def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
     if dto.age >= 18:
         return HTTPResponse(200, dto.nickname + "is adult")
     else:
         return HTTPResponse(200, dto.nickname + "is not adult")
+
+
+# With DTO validation from Query String (FastAPI style)
+def get_user_dto_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+    if dto.age >= 18:
+        return HTTPResponse(200, dto.nickname + " is adult (GET)")
+    else:
+        return HTTPResponse(200, dto.nickname + " is minor (GET)")
 
 
 # Echo request header and set response header
@@ -122,6 +130,7 @@ def main():
     router.get("/query", query_test)
     router.get("/query/dict", query_dict_test)
     router.post("/user", dto_validation_test)
+    router.get("/user/query", get_user_dto_test)
 
     router.get("/cookies/set", cookie_set_handler)
     router.get("/cookies/read", cookie_read_handler)

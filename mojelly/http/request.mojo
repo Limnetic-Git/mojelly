@@ -1,11 +1,11 @@
-from mojelly.http.query import parse_query_string
+from mojelly.http.query import QueryParams, parse_query_string
 
 
 struct HTTPRequest:
     var url: String
     var path: String
     var query_string: String
-    var query: Dict[String, String]
+    var query: QueryParams
     var method: String
     var body: String
     var headers: Dict[String, String]
@@ -34,9 +34,9 @@ struct HTTPRequest:
             self.query_string = query_string
 
         if self.query_string != "":
-            self.query = parse_query_string(self.query_string)
+            self.query = QueryParams(self.query_string)
         else:
-            self.query = Dict[String, String]()
+            self.query = QueryParams()
 
         self.method = method
         self.body = ""
@@ -55,5 +55,11 @@ struct HTTPRequest:
     def get_query(self, name: String, default: String = "") -> String:
         return self.query.get(name, default)
 
+    def get_query_int(self, name: String, default: Int = 0) -> Int:
+        return self.query.get_int(name, default)
+
+    def get_query_bool(self, name: String, default: Bool = False) -> Bool:
+        return self.query.get_bool(name, default)
+
     def has_query(self, name: String) -> Bool:
-        return name in self.query
+        return self.query.has(name)

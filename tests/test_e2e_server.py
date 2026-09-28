@@ -205,6 +205,25 @@ def run_tests():
             body = e.read().decode("utf-8")
             assert_test("POST /user invalid JSON body text", body == "Invalid JSON body")
 
+        # 10b. GET /user/query with DTO validation from query string (FastAPI style)
+        req = urllib.request.Request(f"{SERVER_URL}/user/query?nickname=Bob&age=30")
+        with urllib.request.urlopen(req) as resp:
+            assert_test("GET /user/query adult returns 200 OK", resp.status == 200)
+            body = resp.read().decode("utf-8")
+            assert_test(
+                "GET /user/query adult response body",
+                body == "Bob is adult (GET)",
+            )
+
+        req = urllib.request.Request(f"{SERVER_URL}/user/query?nickname=Charlie&age=15")
+        with urllib.request.urlopen(req) as resp:
+            assert_test("GET /user/query minor returns 200 OK", resp.status == 200)
+            body = resp.read().decode("utf-8")
+            assert_test(
+                "GET /user/query minor response body",
+                body == "Charlie is minor (GET)",
+            )
+
         # 11. 404 Not Found on missing route
         try:
             urllib.request.urlopen(f"{SERVER_URL}/nonexistent_endpoint")

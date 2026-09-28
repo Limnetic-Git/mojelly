@@ -92,6 +92,33 @@ def test_serialize_query_string() raises:
     assert_true("&" in serialized)
 
 
+def test_query_params_typed_getters() raises:
+    var req = HTTPRequest(
+        url="/search?q=mojo&page=3&limit=50&active=true&debug&invalid_int=abc"
+    )
+    assert_equal(req.query.get("q"), "mojo")
+    assert_equal(req.query.get_int("page", default=1), 3)
+    assert_equal(req.query.get_int("limit", default=10), 50)
+    assert_equal(req.query.get_int("missing_page", default=1), 1)
+    assert_equal(req.query.get_int("invalid_int", default=42), 42)
+
+    assert_true(req.query.get_bool("active"))
+    assert_true(req.query.get_bool("debug"))  # Flag without value is True
+    assert_false(req.query.get_bool("missing_flag", default=False))
+
+    # Also test shortcuts on req
+    assert_equal(req.get_query_int("page"), 3)
+    assert_true(req.get_query_bool("active"))
+
+
+def test_query_params_to_json() raises:
+    var req = HTTPRequest(url="/user?nickname=Alice&age=25&active=true")
+    var json_str = req.query.to_json()
+    assert_true('"nickname":"Alice"' in json_str)
+    assert_true('"age":25' in json_str)
+    assert_true('"active":true' in json_str)
+
+
 def main() raises:
     print("Running Query String unit tests...")
     test_empty_query()
@@ -101,4 +128,6 @@ def main() raises:
     test_url_decoding()
     test_edge_cases_and_delimiters()
     test_serialize_query_string()
+    test_query_params_typed_getters()
+    test_query_params_to_json()
     print("✅ All Query String unit tests passed!")
