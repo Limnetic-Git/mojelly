@@ -329,7 +329,9 @@ def extract_all_defs(user_code: String) raises -> Dict[String, Bool]:
         var name_start = trimmed.find("def ") + 4
         var open_paren = trimmed.find("(")
         if name_start < open_paren:
-            var name = safe_strip(substring_range(trimmed, name_start, open_paren))
+            var name = safe_strip(
+                substring_range(trimmed, name_start, open_paren)
+            )
             var generic_start = name.find("[")
             if generic_start != -1:
                 name = safe_strip(substring_range(name, 0, generic_start))
@@ -431,6 +433,7 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
             routes[key] = handler
 
     return routes^
+
 
 struct ImportInfo:
     var module: String
@@ -579,13 +582,13 @@ def resolve_import_path(
         while dots < len(bytes) and bytes[dots] == 46:
             dots += 1
         var parent_levels = dots - 1
-        var rest = String(m[byte=dots:len(bytes)])
+        var rest = String(m[byte = dots : len(bytes)])
         var rel = rest.replace(".", "/")
 
         for _ in range(parent_levels):
             var last_slash = prefix.rfind("/")
             if last_slash > 0:
-                var new_prefix = String(prefix[byte=0:last_slash + 1])
+                var new_prefix = String(prefix[byte = 0 : last_slash + 1])
                 prefix = new_prefix
             else:
                 prefix = ""
@@ -640,7 +643,7 @@ def find_dto_in_file(
     var base_dir = ""
     var slash_pos = file_path.rfind("/")
     if slash_pos != -1:
-        base_dir = String(file_path[byte=0:slash_pos + 1])
+        base_dir = String(file_path[byte = 0 : slash_pos + 1])
 
     var imports = parse_imports(code)
     for imp_idx in range(len(imports)):
@@ -662,14 +665,13 @@ def find_dto_in_file(
             continue
 
         var imported_path = imported_path_opt.value()
-        var found_dto = find_dto_in_file(
-            ctx, imported_path, matching_orig
-        )
+        var found_dto = find_dto_in_file(ctx, imported_path, matching_orig)
         if found_dto != "":
             ctx.symbol_cache[cache_key] = found_dto
             return found_dto
 
     return ""
+
 
 def generated_dto_wrapper_name(handler: String) -> String:
     var result = "__mojelly_dto_"
@@ -728,7 +730,7 @@ def generate_routes_code(
         var key = keys[i]
         var colon = key.find(":")
         var method = String(key[byte=0:colon])
-        var path = String(key[byte=colon+1:len(key.as_bytes())])
+        var path = String(key[byte = colon + 1 : len(key.as_bytes())])
         var handler = routes.get(key, "")
         if handler != "":
             var registered_handler = handler
@@ -763,7 +765,7 @@ def generate_server(user_file: String) -> Optional[String]:
     var base_dir = ""
     var slash_pos = user_file.rfind("/")
     if slash_pos != -1:
-        base_dir = String(user_file[byte=0:slash_pos + 1])
+        base_dir = String(user_file[byte = 0 : slash_pos + 1])
 
     var ctx = ResolveContext(base_dir=base_dir^)
 
@@ -789,7 +791,14 @@ def generate_server(user_file: String) -> Optional[String]:
             if dto != "":
                 handler_dtos[handler] = dto
             else:
-                print("⚠️ No DTO found for handler:", handler, "! This likely won't have an impact, but it is better to use an explicit import for the DTO instead of `*`")
+                print(
+                    "⚠️ No DTO found for handler:",
+                    handler,
+                    (
+                        "! This likely won't have an impact, but it is better"
+                        " to use an explicit import for the DTO instead of `*`"
+                    ),
+                )
 
         except e:
             print("⚠️ Error resolving DTO for", handler, ":", e)

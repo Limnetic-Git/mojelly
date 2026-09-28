@@ -3,7 +3,8 @@ from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
 from dto import UserDTO
 from test_html_page import test_html_page, test_css
-from test_handlers import *#dto_validation_test, user_handler
+from test_handlers import *  # dto_validation_test, user_handler
+
 
 # Hello world plain text response
 def hello_world(req: HTTPRequest) -> HTTPResponse:
@@ -32,7 +33,7 @@ def css_test(req: HTTPRequest) -> HTTPResponse:
 
 
 # With DTO validation
-#def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+# def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
 #    if dto.age >= 18:
 #        return HTTPResponse(200, dto.nickname + "is adult")
 #    else:

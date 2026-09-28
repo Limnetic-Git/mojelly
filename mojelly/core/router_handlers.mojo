@@ -4,16 +4,19 @@ from mojelly.http.response import HTTPResponse
 
 comptime Handler = def(HTTPRequest) thin -> HTTPResponse
 
-comptime SLASH: UInt8 = 47      # '/'
-comptime COLON: UInt8 = 58      # ':'
-comptime STAR: UInt8 = 42       # '*'
+comptime SLASH: UInt8 = 47  # '/'
+comptime COLON: UInt8 = 58  # ':'
+comptime STAR: UInt8 = 42  # '*'
+
 
 struct Segment:
     var is_param: Bool
     var is_wildcard: Bool
     var name: String
 
-    def __init__(out self, var is_param: Bool, var is_wildcard: Bool, var name: String):
+    def __init__(
+        out self, var is_param: Bool, var is_wildcard: Bool, var name: String
+    ):
         self.is_param = is_param
         self.is_wildcard = is_wildcard
         self.name = name^
@@ -42,6 +45,7 @@ struct CompiledPattern:
         self.handler = handler
         self.method = method^
 
+
 def split_segments(url: String) -> List[Tuple[Int, Int]]:
     var result = List[Tuple[Int, Int]]()
     var bytes = url.as_bytes()
@@ -58,6 +62,7 @@ def split_segments(url: String) -> List[Tuple[Int, Int]]:
         result.append((start, i))
 
     return result^
+
 
 def compile_pattern(
     path: String,
@@ -108,6 +113,7 @@ def compile_pattern(
 
     return CompiledPattern(segments=segs^, handler=handler, method=method)
 
+
 def match_compiled(
     cp: CompiledPattern,
     url: String,
@@ -155,6 +161,7 @@ def match_compiled(
 
     return Optional[Dict[String, String]](params^)
 
+
 struct RouterHandlers:
     var exact: Dict[String, Dict[String, Handler]]
 
@@ -164,11 +171,15 @@ struct RouterHandlers:
         self.exact = Dict[String, Dict[String, Handler]]()
         self.patterns = List[CompiledPattern]()
 
-    def _insert_exact(mut self, method: String, path: String, handler: Handler) raises:
+    def _insert_exact(
+        mut self, method: String, path: String, handler: Handler
+    ) raises:
         ref bucket = self.exact[method]
         bucket[path] = handler
 
-    def _lookup_exact(self, method: String, url: String) raises -> Optional[Handler]:
+    def _lookup_exact(
+        self, method: String, url: String
+    ) raises -> Optional[Handler]:
         ref bucket = self.exact[method]
         if url in bucket:
             return bucket[url]
