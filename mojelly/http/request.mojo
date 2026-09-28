@@ -71,4 +71,3 @@ struct HTTPRequest:
 
     def has_param(self, name: String) -> Bool:
         return name in self.params
-
