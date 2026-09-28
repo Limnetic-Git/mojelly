@@ -31,12 +31,14 @@ def css_test(req: HTTPRequest) -> HTTPResponse:
     resp.set_css()
     return resp^
 
+
 # With DTO validation
 # def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
 #    if dto.age >= 18:
 #        return HTTPResponse(200, dto.nickname + "is adult")
 #    else:
 #        return HTTPResponse(200, dto.nickname + "is not adult")
+
 
 # With DTO validation from Query String (FastAPI style)
 def get_user_dto_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
@@ -116,7 +118,6 @@ def cookie_delete_handler(req: HTTPRequest) -> HTTPResponse:
     resp.delete_cookie("session")
     resp.delete_cookie("theme")
     return resp^
-
 
 
 # Some path-params handlers:
