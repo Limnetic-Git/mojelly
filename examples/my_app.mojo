@@ -54,6 +54,13 @@ def query_test(req: HTTPRequest) -> HTTPResponse:
     )
 
 
+# Read query dictionary
+def query_dict_test(req: HTTPRequest) -> HTTPResponse:
+    var name = req.get_query("name", "Guest")
+    var page = req.get_query("page", "1")
+    return HTTPResponse(200, "Hello " + name + ", page " + page)
+
+
 # Set cookie
 def cookie_set_handler(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, "Cookies set!\nGo to /cookies/read")
@@ -113,6 +120,7 @@ def main():
     router.get("/style.css", css_test)
     router.get("/headers", headers_test)
     router.get("/query", query_test)
+    router.get("/query/dict", query_dict_test)
     router.post("/user", dto_validation_test)
 
     router.get("/cookies/set", cookie_set_handler)

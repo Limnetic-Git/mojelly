@@ -1,7 +1,11 @@
+from mojelly.http.query import parse_query_string
+
+
 struct HTTPRequest:
     var url: String
     var path: String
     var query_string: String
+    var query: Dict[String, String]
     var method: String
     var body: String
     var headers: Dict[String, String]
@@ -28,6 +32,12 @@ struct HTTPRequest:
         else:
             self.path = path
             self.query_string = query_string
+
+        if self.query_string != "":
+            self.query = parse_query_string(self.query_string)
+        else:
+            self.query = Dict[String, String]()
+
         self.method = method
         self.body = ""
         self.headers = Dict[String, String]()
@@ -41,3 +51,9 @@ struct HTTPRequest:
 
     def has_cookie(self, name: String) -> Bool:
         return name in self.cookies
+
+    def get_query(self, name: String, default: String = "") -> String:
+        return self.query.get(name, default)
+
+    def has_query(self, name: String) -> Bool:
+        return name in self.query

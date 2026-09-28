@@ -138,6 +138,24 @@ def run_tests():
                 body == "Path: /query, Query: foo=alpha&bar=beta",
             )
 
+        # 6b. GET /query/dict with query parameters and defaults
+        req = urllib.request.Request(f"{SERVER_URL}/query/dict?name=Alice&page=5")
+        with urllib.request.urlopen(req) as resp:
+            assert_test("GET /query/dict returns 200 OK", resp.status == 200)
+            body = resp.read().decode("utf-8")
+            assert_test(
+                "GET /query/dict parsed dictionary values correctly",
+                body == "Hello Alice, page 5",
+            )
+
+        req = urllib.request.Request(f"{SERVER_URL}/query/dict")
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8")
+            assert_test(
+                "GET /query/dict fallback to default values",
+                body == "Hello Guest, page 1",
+            )
+
         # 7. GET /json with query string (verifying existing routes match with query)
         req = urllib.request.Request(f"{SERVER_URL}/json?cache=false")
         with urllib.request.urlopen(req) as resp:

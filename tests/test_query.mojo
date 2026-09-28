@@ -1,4 +1,9 @@
-from mojelly.http.query import parse_query_string, serialize_query_string, url_decode, url_encode
+from mojelly.http.query import (
+    parse_query_string,
+    serialize_query_string,
+    url_decode,
+    url_encode,
+)
 from mojelly.http.request import HTTPRequest
 from std.testing import assert_equal, assert_true, assert_false
 
