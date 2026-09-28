@@ -6,6 +6,7 @@ struct HTTPRequest:
     var body: String
     var headers: Dict[String, String]
     var cookies: Dict[String, String]
+    var params: Dict[String, String]
 
     def __init__(
         out self,
@@ -32,6 +33,7 @@ struct HTTPRequest:
         self.body = ""
         self.headers = Dict[String, String]()
         self.cookies = Dict[String, String]()
+        self.params = Dict[String, String]()
 
     def get_header(self, name: String) -> String:
         return self.headers.get(name, "")
@@ -41,3 +43,9 @@ struct HTTPRequest:
 
     def has_cookie(self, name: String) -> Bool:
         return name in self.cookies
+
+    def get_param(self, name: String) -> String:
+        return self.params.get(name, "")
+
+    def has_param(self, name: String) -> Bool:
+        return name in self.params

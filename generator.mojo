@@ -4,7 +4,7 @@
 from std.os import mkdir
 from std.memory.alloc import alloc, dealloc, Layout
 
-comptime USE_MULTITHREAD: Bool = True  # U can turn it off, but its not recommended =)
+comptime USE_MULTITHREAD: Bool = True
 
 
 def read_user_file(path: String) -> Optional[String]:
@@ -318,6 +318,27 @@ def extract_handler_dtos(user_code: String) raises -> Dict[String, String]:
     return handler_dtos^
 
 
+def extract_all_defs(user_code: String) raises -> Dict[String, Bool]:
+    """Собирает ВСЕ имена def в файле, независимо от наличия DTO."""
+    var result = Dict[String, Bool]()
+    for line_span in user_code.split("\n"):
+        var line = strip_source_comment(String(line_span))
+        var trimmed = safe_strip(line)
+        if not trimmed.startswith("def "):
+            continue
+        var name_start = trimmed.find("def ") + 4
+        var open_paren = trimmed.find("(")
+        if name_start < open_paren:
+            var name = safe_strip(
+                substring_range(trimmed, name_start, open_paren)
+            )
+            var generic_start = name.find("[")
+            if generic_start != -1:
+                name = safe_strip(substring_range(name, 0, generic_start))
+            result[name] = True
+    return result^
+
+
 def extract_handlers(user_code: String) -> Dict[String, String]:
     var routes = Dict[String, String]()
     var lines = user_code.split("\n")
@@ -414,6 +435,244 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
     return routes^
 
 
+struct ImportInfo:
+    var module: String
+    var symbols: List[String]
+    var aliases: List[String]
+    var is_relative: Bool
+
+    def __init__(
+        out self,
+        var module: String,
+        var symbols: List[String],
+        var aliases: List[String],
+        var is_relative: Bool,
+    ):
+        self.module = module^
+        self.symbols = symbols^
+        self.aliases = aliases^
+        self.is_relative = is_relative
+
+
+struct ResolveContext:
+    var base_dir: String
+    var visited: Dict[String, Bool]
+    var code_cache: Dict[String, String]
+    var symbol_cache: Dict[String, String]
+
+    def __init__(out self, var base_dir: String):
+        self.base_dir = base_dir^
+        self.visited = Dict[String, Bool]()
+        self.code_cache = Dict[String, String]()
+        self.symbol_cache = Dict[String, String]()
+
+    def read_cached(mut self, path: String) -> Optional[String]:
+        var cached = self.code_cache.get(path, "")
+        if cached != "":
+            return Optional[String](cached)
+        var content_opt = read_user_file(path)
+        if content_opt is None:
+            return None
+        var content = content_opt.value()
+        self.code_cache[path] = content
+        return Optional[String](content)
+
+
+def strip_comment_from_line(line: String) raises -> String:
+    var bytes = line.as_bytes()
+    var quote_state = SourceQuoteState()
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if quote_state.consume(b):
+            continue
+        if b == 34 or b == 39:
+            quote_state.quote = b
+        elif b == 35:
+            return substring_range(line, 0, i)
+    return line
+
+
+def parse_imports(code: String) raises -> List[ImportInfo]:
+    var result = List[ImportInfo]()
+
+    for line_span in code.split("\n"):
+        var line = String(line_span)
+        var stripped = strip_comment_from_line(line)
+        line = safe_strip(stripped)
+
+        if not line.startswith("from "):
+            continue
+
+        var import_pos = line.find(" import ")
+        if import_pos == -1:
+            continue
+
+        var module_part = substring_range(line, 5, import_pos)
+        var module = safe_strip(module_part)
+
+        var symbols_start = import_pos + 8
+        var line_len = len(line.as_bytes())
+        var symbols_part = substring_range(line, symbols_start, line_len)
+        var symbols_str = safe_strip(symbols_part)
+
+        var is_relative = module.startswith(".")
+
+        var symbols = List[String]()
+        var aliases = List[String]()
+
+        if symbols_str == "*":
+            symbols.append("*")
+            aliases.append("*")
+        else:
+            var syms_list = symbols_str.split(",")
+            for sym_span in syms_list:
+                var sym_str = String(sym_span)
+                var sym = safe_strip(sym_str)
+                if sym == "":
+                    continue
+
+                var as_pos = sym.find(" as ")
+                if as_pos == -1:
+                    symbols.append(sym)
+                    aliases.append(sym)
+                else:
+                    var orig_part = substring_range(sym, 0, as_pos)
+                    var orig = safe_strip(orig_part)
+
+                    var alias_start = as_pos + 4
+                    var sym_len = len(sym.as_bytes())
+                    var alias_part = substring_range(sym, alias_start, sym_len)
+                    var import_alias = safe_strip(alias_part)
+
+                    if orig != "" and import_alias != "":
+                        symbols.append(orig)
+                        aliases.append(import_alias)
+
+        if len(symbols) > 0:
+            result.append(
+                ImportInfo(
+                    module=module,
+                    symbols=symbols^,
+                    aliases=aliases^,
+                    is_relative=is_relative,
+                )
+            )
+
+    return result^
+
+
+def resolve_import_path(
+    import_info: ImportInfo,
+    base_dir: String,
+) -> Optional[String]:
+    var m = import_info.module
+
+    if m == "mojelly" or m.startswith("mojelly."):
+        return None
+    if m == "std" or m.startswith("std."):
+        return None
+    if m == "sys" or m.startswith("sys."):
+        return None
+
+    var prefix = base_dir
+
+    if import_info.is_relative:
+        var bytes = m.as_bytes()
+        var dots = 0
+        while dots < len(bytes) and bytes[dots] == 46:
+            dots += 1
+        var parent_levels = dots - 1
+        var rest = String(m[byte = dots : len(bytes)])
+        var rel = rest.replace(".", "/")
+
+        for _ in range(parent_levels):
+            var last_slash = prefix.rfind("/")
+            if last_slash > 0:
+                var new_prefix = String(prefix[byte = 0 : last_slash + 1])
+                prefix = new_prefix
+            else:
+                prefix = ""
+        var candidate = prefix + rel + ".mojo"
+        try:
+            var f = open(candidate, "r")
+            f.close()
+            return Optional[String](candidate)
+        except:
+            return None
+    else:
+        var candidate = prefix + m.replace(".", "/") + ".mojo"
+        try:
+            var f = open(candidate, "r")
+            f.close()
+            return Optional[String](candidate)
+        except:
+            var init_candidate = prefix + m.replace(".", "/") + "/__init__.mojo"
+            try:
+                var f2 = open(init_candidate, "r")
+                f2.close()
+                return Optional[String](init_candidate)
+            except:
+                return None
+
+
+def find_dto_in_file(
+    mut ctx: ResolveContext,
+    file_path: String,
+    handler: String,
+) raises -> String:
+    if ctx.visited.get(file_path, False):
+        return ""
+    ctx.visited[file_path] = True
+
+    var cache_key = file_path + ":" + handler
+    var cached = ctx.symbol_cache.get(cache_key, "")
+    if cached != "":
+        return cached
+
+    var code_opt = ctx.read_cached(file_path)
+    if code_opt is None:
+        return ""
+    var code = code_opt.value()
+
+    var dtos = extract_handler_dtos(code)
+    var dto = dtos.get(handler, "")
+    if dto != "":
+        ctx.symbol_cache[cache_key] = dto
+        return dto
+
+    var base_dir = ""
+    var slash_pos = file_path.rfind("/")
+    if slash_pos != -1:
+        base_dir = String(file_path[byte = 0 : slash_pos + 1])
+
+    var imports = parse_imports(code)
+    for imp_idx in range(len(imports)):
+        ref imp = imports[imp_idx]
+        var matching_orig = ""
+        for i in range(len(imp.symbols)):
+            if imp.aliases[i] == handler or imp.symbols[i] == handler:
+                matching_orig = imp.symbols[i]
+                break
+            if imp.symbols[i] == "*":
+                matching_orig = handler
+                break
+
+        if matching_orig == "":
+            continue
+
+        var imported_path_opt = resolve_import_path(imp, base_dir)
+        if imported_path_opt is None:
+            continue
+
+        var imported_path = imported_path_opt.value()
+        var found_dto = find_dto_in_file(ctx, imported_path, matching_orig)
+        if found_dto != "":
+            ctx.symbol_cache[cache_key] = found_dto
+            return found_dto
+
+    return ""
+
+
 def generated_dto_wrapper_name(handler: String) -> String:
     var result = "__mojelly_dto_"
     var bytes = handler.as_bytes()
@@ -469,9 +728,9 @@ def generate_routes_code(
 
     for i in range(len(keys)):
         var key = keys[i]
-        var parts = key.split(":")
-        var method = String(parts[0])
-        var path = String(parts[1])
+        var colon = key.find(":")
+        var method = String(key[byte=0:colon])
+        var path = String(key[byte = colon + 1 : len(key.as_bytes())])
         var handler = routes.get(key, "")
         if handler != "":
             var registered_handler = handler
@@ -502,6 +761,48 @@ def generate_server(user_file: String) -> Optional[String]:
         print("Error parsing handler signatures:")
         print("   ", e)
         return None
+
+    var base_dir = ""
+    var slash_pos = user_file.rfind("/")
+    if slash_pos != -1:
+        base_dir = String(user_file[byte = 0 : slash_pos + 1])
+
+    var ctx = ResolveContext(base_dir=base_dir^)
+
+    var local_defs: Dict[String, Bool]
+    try:
+        local_defs = extract_all_defs(user_code)
+    except e:
+        print("Error extracting defs:")
+        print("   ", e)
+        return None
+
+    for key in routes.keys():
+        var handler = routes.get(key, "")
+        if handler == "":
+            continue
+        if handler_dtos.get(handler, "") != "":
+            continue
+        if local_defs.get(handler, False):
+            continue
+        ctx.visited = Dict[String, Bool]()
+        try:
+            var dto = find_dto_in_file(ctx, user_file, handler)
+            if dto != "":
+                handler_dtos[handler] = dto
+            else:
+                print(
+                    "⚠️ No DTO found for handler:",
+                    handler,
+                    (
+                        "! This likely won't have an impact, but it is better"
+                        " to use an explicit import for the DTO instead of `*`"
+                    ),
+                )
+
+        except e:
+            print("⚠️ Error resolving DTO for", handler, ":", e)
+
     var dto_wrappers_code = generate_dto_wrappers_code(routes, handler_dtos)
     var routes_code = generate_routes_code(routes, handler_dtos)
     var json_import = String()
@@ -734,7 +1035,6 @@ def mojo_handler(
         http_response += "Set-Cookie: " + cookie + "\\r\\n"
     http_response += "\\r\\n"
     http_response += router_response.body
-
     var result = string_to_c_string(http_response)
     return result
 
