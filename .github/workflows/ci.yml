@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - dev
+      - io_uring-experemental
   pull_request:
     branches:
       - main
