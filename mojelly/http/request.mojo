@@ -1,11 +1,16 @@
+from mojelly.http.query import QueryParams, parse_query_string
+
+
 struct HTTPRequest:
     var url: String
     var path: String
     var query_string: String
+    var query: QueryParams
     var method: String
     var body: String
     var headers: Dict[String, String]
     var cookies: Dict[String, String]
+    var params: Dict[String, String]
 
     def __init__(
         out self,
@@ -28,10 +33,17 @@ struct HTTPRequest:
         else:
             self.path = path
             self.query_string = query_string
+
+        if self.query_string != "":
+            self.query = QueryParams(self.query_string)
+        else:
+            self.query = QueryParams()
+
         self.method = method
         self.body = ""
         self.headers = Dict[String, String]()
         self.cookies = Dict[String, String]()
+        self.params = Dict[String, String]()
 
     def get_header(self, name: String) -> String:
         return self.headers.get(name, "")
@@ -41,3 +53,21 @@ struct HTTPRequest:
 
     def has_cookie(self, name: String) -> Bool:
         return name in self.cookies
+
+    def get_query(self, name: String, default: String = "") -> String:
+        return self.query.get(name, default)
+
+    def get_query_int(self, name: String, default: Int = 0) -> Int:
+        return self.query.get_int(name, default)
+
+    def get_query_bool(self, name: String, default: Bool = False) -> Bool:
+        return self.query.get_bool(name, default)
+
+    def has_query(self, name: String) -> Bool:
+        return self.query.has(name)
+
+    def get_param(self, name: String) -> String:
+        return self.params.get(name, "")
+
+    def has_param(self, name: String) -> Bool:
+        return name in self.params

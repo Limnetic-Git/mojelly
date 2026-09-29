@@ -44,6 +44,7 @@ run_unit_test "tests/test_request.mojo" "HTTPRequest Suite"
 run_unit_test "tests/test_response.mojo" "HTTPResponse Suite"
 run_unit_test "tests/test_router.mojo" "RouterHandlers Suite"
 run_unit_test "tests/test_router_builder.mojo" "RouterBuilder Suite"
+run_unit_test "tests/test_query.mojo" "Query String Suite"
 run_unit_test "tests/test_generator_helpers.mojo" "Generator Helpers Suite"
 
 # 2. Python E2E Integration Suite
