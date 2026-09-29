@@ -826,33 +826,33 @@ def generate_server(user_file: String) -> Optional[String]:
     )
 
     var main_code = (
-        'def main():\n'
-        '    print("🍇 Mojelly HTTP Server (' + mode_name + ')")\n'
-        '\n'
-        '    var port: Int32 = 8080\n'
-        '    var num_threads: Int32 = ' + num_threads_expr + '\n'
-        '\n'
-        '    var layout = Layout[RouterHandlers].single()\n'
-        '    var alloc_result = alloc(layout)\n'
-        '    var router_ptr = alloc_result^.unsafe_leak()\n'
-        '    router_ptr[] = RouterHandlers()\n'
-        '\n'
-        'ROUTES_PLACEHOLDER\n'
-        '\n'
-        '    mojelly_ensure_init()\n'
-        '\n'
-        '    var router_void = router_ptr.unsafe_bitcast[NoneType]()\n'
-        '    var router_void_fixed = '
-        'router_void.unsafe_origin_cast[MutUntrackedOrigin]()\n'
-        '    mojelly_set_router(router_void_fixed)\n'
-        '\n'
-        '    pthread_create_wrapper(port, router_void_fixed, num_threads)\n'
-        '\n'
+        'def main():\n    print("🍇 Mojelly HTTP Server ('
+        + mode_name
+        + ')")\n\n    var port: Int32 = 8080\n    var num_threads: Int32 = '
+        + num_threads_expr
+        + "\n"
+        "\n"
+        "    var layout = Layout[RouterHandlers].single()\n"
+        "    var alloc_result = alloc(layout)\n"
+        "    var router_ptr = alloc_result^.unsafe_leak()\n"
+        "    router_ptr[] = RouterHandlers()\n"
+        "\n"
+        "ROUTES_PLACEHOLDER\n"
+        "\n"
+        "    mojelly_ensure_init()\n"
+        "\n"
+        "    var router_void = router_ptr.unsafe_bitcast[NoneType]()\n"
+        "    var router_void_fixed = "
+        "router_void.unsafe_origin_cast[MutUntrackedOrigin]()\n"
+        "    mojelly_set_router(router_void_fixed)\n"
+        "\n"
+        "    pthread_create_wrapper(port, router_void_fixed, num_threads)\n"
+        "\n"
         '    print("✅ All", num_threads, "threads started")\n'
         '    print("🚀 Server listening on port", port)\n'
-        '\n'
-        '    while True:\n'
-        '        sleep(1000)\n'
+        "\n"
+        "    while True:\n"
+        "        sleep(1000)\n"
     )
 
     var template = (
