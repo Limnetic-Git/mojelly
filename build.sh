@@ -93,11 +93,12 @@ else
 fi
 
 if [ "$NEED_REBUILD" = true ]; then
-    echo "🔨 Building C core with -O3..."
+    echo "🔨 Building C core with -O3 (io_uring Proactor)..."
 
     cd src_c
 
-    gcc -c bridge.c -o bridge.o \
+    # --- io_uring bridge ---
+    gcc -c bridge_uring.c -o bridge_uring.o \
         -I/usr/include \
         -I/usr/include/llhttp \
         -I/usr/local/include \
@@ -106,6 +107,7 @@ if [ "$NEED_REBUILD" = true ]; then
         -O3 -march=native -mtune=native -pipe \
         -funroll-loops -ffast-math
 
+    # --- Optional SSL bridge (if present) ---
     gcc -c bridge_ssl.c -O3 -o bridge_ssl.o \
         -I/usr/include \
         -I/usr/include/openssl \
@@ -113,8 +115,14 @@ if [ "$NEED_REBUILD" = true ]; then
         -fPIC \
         2>/dev/null || echo "⚠️ bridge_ssl.c not found or failed to compile"
 
-    ar rcs ../lib/libmojelly.a bridge.o bridge_ssl.o 2>/dev/null || ar rcs ../lib/libmojelly.a bridge.o
-    rm -f bridge.o bridge_ssl.o 2>/dev/null
+    if [ -f "bridge_ssl.o" ]; then
+        ar rcs ../lib/libmojelly.a bridge_uring.o bridge_ssl.o
+        rm -f bridge_uring.o bridge_ssl.o
+    else
+        ar rcs ../lib/libmojelly.a bridge_uring.o
+        rm -f bridge_uring.o
+    fi
+
     cd ..
 
     echo "✅ libmojelly.a rebuilt!"
@@ -138,10 +146,12 @@ if [ ! -f "build/app_generated.mojo" ]; then
     exit 1
 fi
 
+# NOTE: -luv is gone (io_uring bridge does not use libuv).
+#       -luring is added for io_uring.
 LINK_FLAGS="-Xlinker -L./lib \
     -Xlinker -L/usr/local/lib \
     -Xlinker -lmojelly \
-    -Xlinker -luv \
+    -Xlinker -luring \
     -Xlinker -lllhttp \
     -Xlinker -lssl \
     -Xlinker -lcrypto \
