@@ -142,9 +142,17 @@ def css_test(req: HTTPRequest) -> HTTPResponse:
 # With DTO validation
 def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
     if dto.age >= 18:
-        return HTTPResponse(200, dto.nickname + " is adult")
+        return HTTPResponse(200, dto.nickname + "is adult")
     else:
-        return HTTPResponse(200, dto.nickname + " is not adult")
+        return HTTPResponse(200, dto.nickname + "is not adult")
+
+
+# With DTO validation from Query String (FastAPI style)
+def get_user_dto_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+    if dto.age >= 18:
+        return HTTPResponse(200, dto.nickname + " is adult (GET)")
+    else:
+        return HTTPResponse(200, dto.nickname + " is minor (GET)")
 
 
 # Echo request header and set response header
@@ -160,6 +168,13 @@ def query_test(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(
         200, "Path: " + req.path + ", Query: " + req.query_string
     )
+
+
+# Read query dictionary
+def query_dict_test(req: HTTPRequest) -> HTTPResponse:
+    var name = req.get_query("name", "Guest")
+    var page = req.get_query("page", "1")
+    return HTTPResponse(200, "Hello " + name + ", page " + page)
 
 
 # Set cookie
@@ -212,6 +227,27 @@ def cookie_delete_handler(req: HTTPRequest) -> HTTPResponse:
     return resp^
 
 
+# Some path-params handlers:
+def profile_handler(req: HTTPRequest) -> HTTPResponse:
+    var login = req.get_param("login")
+    var resp = HTTPResponse(200, "Profile of " + login)
+    return resp^
+
+
+def post_handler(req: HTTPRequest) -> HTTPResponse:
+    var user_id = req.get_param("id")
+    var post_id = req.get_param("post_id")
+    var resp = HTTPResponse(200, "Post " + post_id + " by user " + user_id)
+    return resp^
+
+
+def move_page_handler(req: HTTPRequest) -> HTTPResponse:
+    var page_id = req.get_param("page_id")
+    var move_to = req.get_param("move_to")
+    var resp = HTTPResponse(200, "Move page " + page_id + " to " + move_to)
+    return resp^
+
+
 def main():
     var router = RouterHandlers()
 
@@ -221,16 +257,22 @@ def main():
     router.get("/style.css", css_test)
     router.get("/headers", headers_test)
     router.get("/query", query_test)
+    router.get("/query/dict", query_dict_test)
     router.post("/user", dto_validation_test)
+    router.get("/user/query", get_user_dto_test)
 
     router.get("/cookies/set", cookie_set_handler)
     router.get("/cookies/read", cookie_read_handler)
     router.get("/cookies/delete", cookie_delete_handler)
 
+    router.get("/user/:id", user_handler)
+    router.get("/user/:login/profile", profile_handler)
+    router.get("/user/:id/posts/:post_id", post_handler)
+    router.post("/move-page/:page_id/:move_to", move_page_handler)
+
     var server = HTTPServer(router)
     server.listen(8080)
     server.run()
-
 ```
 
 After this, run `build.sh` 🛠️:
