@@ -1,0 +1,104 @@
+name: Performance
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: "Max allowed throughput drop vs base, in percent"
+        default: "15"
+
+env:
+  # GitHub runners are noisy: only the head-vs-base ratio measured in this
+  # very job is gated, never absolute numbers.
+  THRESHOLD_PERCENT: ${{ inputs.threshold || '15' }}
+  OHA_VERSION: v1.16.0
+
+jobs:
+  benchmark:
+    name: Benchmark (head vs base)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout head
+        uses: actions/checkout@v4
+        with:
+          path: head
+
+      - name: Checkout base
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.repository.default_branch }}
+          path: base
+
+      - name: Install system C dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libuv1-dev libssl-dev gcc cmake python3 jq
+          git clone --depth 1 -b release/v9.4.3 https://github.com/nodejs/llhttp.git /tmp/llhttp
+          cmake -B /tmp/llhttp/build -S /tmp/llhttp -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build /tmp/llhttp/build -j
+          sudo cmake --install /tmp/llhttp/build
+          sudo ldconfig
+
+      - name: Install oha
+        run: |
+          curl -fsSL -o oha "https://github.com/hatoo/oha/releases/download/${OHA_VERSION}/oha-linux-amd64"
+          sudo install -m 0755 oha /usr/local/bin/oha
+          oha --version
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.80.0
+          cache: true
+          manifest-path: head/pixi.toml
+
+      - name: Build base
+        working-directory: base
+        run: |
+          # a stale tracked archive would be appended to, not replaced
+          rm -f lib/libmojelly.a
+          pixi run build
+
+      - name: Build head
+        working-directory: head
+        run: |
+          rm -f lib/libmojelly.a
+          pixi run build
+
+      - name: Benchmark base
+        env:
+          PERF_SERVER_CPUS: "0,1"
+          PERF_CLIENT_CPUS: "2,3"
+        run: head/scripts/perf_bench.sh base base.json
+
+      - name: Benchmark head
+        env:
+          PERF_SERVER_CPUS: "0,1"
+          PERF_CLIENT_CPUS: "2,3"
+        run: head/scripts/perf_bench.sh head head.json
+
+      - name: Compare and report
+        run: |
+          python3 head/scripts/perf_compare.py base.json head.json \
+            --threshold "$THRESHOLD_PERCENT" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Upload raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results
+          path: |
+            base.json
+            head.json
+            base/oha.json
+            head/oha.json
+            base/server.log
+            head/server.log
