@@ -75,6 +75,16 @@ def run_tests():
                 resp.headers.get("Content-Type") == "text/plain",
             )
 
+        # 1b. Body with an embedded NUL byte is not truncated
+        req = urllib.request.Request(f"{SERVER_URL}/nul")
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read()
+            assert_test(
+                "GET /nul keeps bytes after NUL",
+                raw == b"A\x00B" and resp.headers.get("Content-Length") == "3",
+                f"got {raw!r}",
+            )
+
         # 2. GET /json
         req = urllib.request.Request(f"{SERVER_URL}/json")
         with urllib.request.urlopen(req) as resp:

@@ -965,8 +965,7 @@ def string_to_c_string(s: String) -> C_UInt8:
     var bytes = s.as_bytes()
     var len = len(bytes)
     var ptr = external_call["malloc", C_UInt8, UInt64](UInt64(len + 1))
-    for i in range(len):
-        ptr.unsafe_offset(i).unsafe_write(bytes[i])
+    _ = external_call["memcpy", C_UInt8, C_UInt8, C_UInt8, UInt64](ptr, bytes.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutUntrackedOrigin](), UInt64(len))
     ptr.unsafe_offset(len).unsafe_write(0)
     return ptr
 
@@ -982,11 +981,17 @@ def mojo_handler(
     url_ptr: C_UInt8,
     method_ptr: C_UInt8,
     headers_ptr: C_UInt8,
-    body_ptr: C_UInt8
+    body_ptr: C_UInt8,
+    out_len: Pointer[UInt64, MutUntrackedOrigin],
+    out_ownership: Pointer[Int32, MutUntrackedOrigin]
 ) abi("C") -> C_UInt8:
+    # The response is malloc'ed here and freed by the C side (MOJO_RESP_OWNED = 0);
+    # its real length goes to out_len so bodies containing NUL bytes survive.
+    out_ownership[] = 0
 
     if not router_ptr:
         var err_response = "HTTP/1.1 500 Internal Server Error\\r\\n\\r\\n"
+        out_len[] = UInt64(err_response.byte_length())
         return string_to_c_string(err_response)
 
     var router = router_ptr.value()
@@ -1041,6 +1046,7 @@ def mojo_handler(
         http_response += "Set-Cookie: " + cookie + "\\r\\n"
     http_response += "\\r\\n"
     http_response += router_response.body
+    out_len[] = UInt64(http_response.byte_length())
     var result = string_to_c_string(http_response)
     return result
 
