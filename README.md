@@ -82,6 +82,46 @@ Transfer/sec:     48.42MB
 ```
 And i will try to make **MORE RPS** cause I love **BLAZING** 🔥
 
+## Logging 📝
+
+Per-request logging is off by default (it costs ~20% throughput). Enable it at startup:
+
+```bash
+MOJELLY_LOG_LEVEL=1 ./server
+```
+
+## Worker threads 🧵
+
+By default Mojelly starts one worker per CPU the process is allowed to use (so `taskset` and container cpusets are respected) and pins each worker to one of those CPUs. Override the count with `MOJELLY_THREADS`:
+
+```bash
+MOJELLY_THREADS=4 ./server
+```
+
+## Limits and timeouts 🛡️
+
+Safe defaults, overridable with environment variables at startup:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MOJELLY_MAX_HEADER_SIZE` | 65536 | URL + headers of one request, bytes (over → `431`) |
+| `MOJELLY_MAX_BODY` | 10485760 | request body, bytes (over → `413`) |
+| `MOJELLY_IDLE_TIMEOUT` | 60 | seconds without traffic before a connection is closed (`0` = off) |
+| `MOJELLY_REQUEST_TIMEOUT` | 30 | seconds allowed to receive one complete request (`0` = off) |
+
+Timeouts are checked once a second, so they are accurate to about one second.
+
+## Performance CI 📈
+
+Every PR to `main` or `dev` is benchmarked by `.github/workflows/perf.yml`: the **PR head**, **dev** and **main** are built and measured one after another on the same runner, and the result is posted as a PR comment. For each scenario (`/json` with 100 and 500 connections, a new connection per request, browser-like headers and cookies, a larger `/html` body) it shows requests/s, p99 latency and server CPU per request, and the PR's change against `dev` and `main`. The job fails if the PR is more than 15% slower than its base branch and the change is larger than the run-to-run noise.
+
+Run it locally (needs [`oha`](https://github.com/hatoo/oha) and a built `./server` in each directory):
+
+```bash
+python3 scripts/perf_run.py --build main=../main --build dev=../dev --build pr=. --out results.json
+python3 scripts/perf_report.py results.json --pr pr --base dev
+```
+
 ## What we use ⚙️
 Mojo language
 C language
@@ -195,7 +235,7 @@ Mojo 1.0.0 (ed45d567)
 ❯ ./server
 🍇 Mojelly HTTP Server (Multithreaded)
 [C] ✅ All 4 threads created
-✅ All 4 threads started
+✅ Worker threads started
 🚀 Server listening on port 8080
 [C] 🧵 Thread 2 listening on CPU 2 (port 8080)
 [C] 🧵 Thread 3 listening on CPU 3 (port 8080)
