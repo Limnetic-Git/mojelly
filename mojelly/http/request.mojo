@@ -46,7 +46,15 @@ struct HTTPRequest:
         self.params = Dict[String, String]()
 
     def get_header(self, name: String) -> String:
-        return self.headers.get(name, "")
+        """Header lookup, case-insensitive as HTTP requires. Names are stored
+        as the client sent them; the exact spelling is tried first."""
+        var exact = self.headers.get(name)
+        if exact:
+            return exact.value()
+        for key in self.headers.keys():
+            if _equal_ignore_case(key, name):
+                return self.headers.get(key, "")
+        return ""
 
     def get_cookie(self, name: String) -> String:
         return self.cookies.get(name, "")
@@ -71,6 +79,24 @@ struct HTTPRequest:
 
     def has_param(self, name: String) -> Bool:
         return name in self.params
+
+
+def _equal_ignore_case(a: String, b: String) -> Bool:
+    """ASCII case-insensitive equality without allocating."""
+    var x = a.as_bytes()
+    var y = b.as_bytes()
+    if len(x) != len(y):
+        return False
+    for i in range(len(x)):
+        var c = x[i]
+        var d = y[i]
+        if c >= 65 and c <= 90:
+            c += 32
+        if d >= 65 and d <= 90:
+            d += 32
+        if c != d:
+            return False
+    return True
 
 
 comptime _SP: UInt8 = 32

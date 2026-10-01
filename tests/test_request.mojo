@@ -93,6 +93,18 @@ def _assert_same(a: Dict[String, String], b: Dict[String, String]) raises:
         assert_equal(a[k], b[k])
 
 
+def test_get_header_is_case_insensitive() raises:
+    var req = HTTPRequest(url="/", method="GET")
+    req.headers["content-type"] = "text/plain"
+    req.headers["X-Mixed-Case"] = "v"
+    assert_equal(req.get_header("Content-Type"), "text/plain")
+    assert_equal(req.get_header("CONTENT-TYPE"), "text/plain")
+    assert_equal(req.get_header("content-type"), "text/plain")
+    assert_equal(req.get_header("x-mixed-case"), "v")
+    assert_equal(req.get_header("X-Mixed-Case"), "v")
+    assert_equal(req.get_header("X-Missing"), "")
+
+
 def test_parse_header_block() raises:
     var h = Dict[String, String]()
     parse_header_block(
@@ -164,6 +176,7 @@ def main() raises:
     test_request_url_with_query()
     test_request_explicit_path_and_query()
     test_request_headers_and_body()
+    test_get_header_is_case_insensitive()
     test_parse_header_block()
     test_parse_header_block_empty_and_duplicates()
     test_parse_cookie_header()
