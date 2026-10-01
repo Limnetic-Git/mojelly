@@ -81,7 +81,8 @@ static _Thread_local unsigned long request_count = 0;
 
 extern char* mojo_handler(void* router, const char* url, const char* method,
                           const char* headers, const char* body,
-                          size_t* out_len, int* out_ownership);
+                          size_t* out_len, int* out_ownership, size_t url_len,
+                          size_t headers_len, size_t body_len);
 
 static void* global_router = NULL;
 
@@ -576,7 +577,8 @@ static int on_message_complete_c(llhttp_t* parser) {
     size_t resp_len = 0;
     int resp_owned = MOJO_RESP_OWNED;
     char* response = mojo_handler(router, url, method, headers, body, &resp_len,
-                                  &resp_owned);
+                                  &resp_owned, ctx->url.len, ctx->headers.len,
+                                  ctx->body.len);
 
     double duration_ms = 0;
     if (log_on) {

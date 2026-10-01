@@ -149,6 +149,11 @@ def nul_body_test(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, body)
 
 
+# Echo the request body with its length (a NUL byte inside must survive)
+def echo_test(req: HTTPRequest) -> HTTPResponse:
+    return HTTPResponse(200, String(req.body.byte_length()) + ":" + req.body)
+
+
 def main():
     var router = RouterHandlers()
 
@@ -160,6 +165,7 @@ def main():
     router.get("/query", query_test)
     router.get("/query/dict", query_dict_test)
     router.get("/nul", nul_body_test)
+    router.post("/echo", echo_test)
     router.post("/user", dto_validation_test)
     router.get("/user/query", get_user_dto_test)
 
