@@ -592,14 +592,38 @@ static int create_bound_socket(int port) {
 
 /* ---------- thread ---------- */
 
+/* CPUs this process may run on (honours taskset / cgroup cpusets). Workers
+ * pin themselves to these, never to CPUs outside the allowed set. */
+static int allowed_cpus[CPU_SETSIZE];
+static int num_allowed_cpus = 0;
+
+static void detect_allowed_cpus(void) {
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    num_allowed_cpus = 0;
+    if (sched_getaffinity(0, sizeof(set), &set) == 0) {
+        for (int c = 0; c < CPU_SETSIZE; c++) {
+            if (CPU_ISSET(c, &set)) allowed_cpus[num_allowed_cpus++] = c;
+        }
+    }
+    if (num_allowed_cpus == 0) allowed_cpus[num_allowed_cpus++] = 0;
+}
+
+/* requested > 0 wins; otherwise MOJELLY_THREADS, otherwise one worker per
+ * allowed CPU. */
+static int resolve_thread_count(int requested) {
+    if (requested > 0) return requested;
+    const char* env = getenv("MOJELLY_THREADS");
+    if (env != NULL && atoi(env) > 0) return atoi(env);
+    return num_allowed_cpus;
+}
+
 static void* thread_main(void* arg) {
     thread_args_t* args = (thread_args_t*)arg;
     current_thread_id = args->thread_id;
     request_count = 0;
 
-    int num_cpus = (int)sysconf(_SC_NPROCESSORS_ONLN);
-    if (num_cpus < 1) num_cpus = 1;
-    int cpu_id = args->thread_id % num_cpus;
+    int cpu_id = allowed_cpus[args->thread_id % num_allowed_cpus];
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpu_id, &cpuset);
@@ -686,6 +710,8 @@ static void* thread_main(void* arg) {
 
 void pthread_create_wrapper(int port, void* router, int num_threads) {
     ensure_settings_init();
+    detect_allowed_cpus();
+    num_threads = resolve_thread_count(num_threads);
 
     for (int i = 0; i < num_threads; i++) {
         pthread_t thread;

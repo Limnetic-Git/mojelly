@@ -823,7 +823,8 @@ def main():
     print("🍇 Mojelly HTTP Server (Multithreaded)")
 
     var port: Int32 = 8080
-    var num_threads: Int32 = 4
+    # 0 = auto: one worker per allowed CPU, or MOJELLY_THREADS if set
+    var num_threads: Int32 = 0
 
     var layout = Layout[RouterHandlers].single()
     var alloc_result = alloc(layout)
@@ -838,7 +839,7 @@ ROUTES_PLACEHOLDER
 
     pthread_create_wrapper(port, router_void_fixed, num_threads)
 
-    print("✅ All", num_threads, "threads started")
+    print("✅ Worker threads started")
     print("🚀 Server listening on port", port)
 
     while True:
