@@ -90,6 +90,14 @@ Per-request logging is off by default (it costs ~20% throughput). Enable it at s
 MOJELLY_LOG_LEVEL=1 ./server
 ```
 
+## Worker threads 🧵
+
+By default Mojelly starts one worker per CPU the process is allowed to use (so `taskset` and container cpusets are respected) and pins each worker to one of those CPUs. Override the count with `MOJELLY_THREADS`:
+
+```bash
+MOJELLY_THREADS=4 ./server
+```
+
 ## What we use ⚙️
 Mojo language
 C language
@@ -203,7 +211,7 @@ Mojo 1.0.0 (ed45d567)
 ❯ ./server
 🍇 Mojelly HTTP Server (Multithreaded)
 [C] ✅ All 4 threads created
-✅ All 4 threads started
+✅ Worker threads started
 🚀 Server listening on port 8080
 [C] 🧵 Thread 2 listening on CPU 2 (port 8080)
 [C] 🧵 Thread 3 listening on CPU 3 (port 8080)
