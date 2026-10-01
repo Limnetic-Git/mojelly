@@ -260,6 +260,33 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
 static void send_response(uv_tcp_t* client, const char* response, size_t len,
                           int keep_alive, int owned);
 
+/* Free-list of write requests, per thread: avoids a malloc/free pair per
+ * response. Several writes can be in flight on one connection (pipelining),
+ * so these are not embedded in the connection context. */
+#define WRITE_REQ_POOL_MAX 256
+static _Thread_local write_req_t* wr_pool = NULL;
+static _Thread_local int wr_pool_len = 0;
+
+static write_req_t* wr_acquire(void) {
+    write_req_t* wr = wr_pool;
+    if (wr != NULL) {
+        wr_pool = *(write_req_t**)wr;
+        wr_pool_len--;
+        return wr;
+    }
+    return (write_req_t*)malloc(sizeof(write_req_t));
+}
+
+static void wr_release(write_req_t* wr) {
+    if (wr_pool_len >= WRITE_REQ_POOL_MAX) {
+        free(wr);
+        return;
+    }
+    *(write_req_t**)wr = wr_pool;
+    wr_pool = wr;
+    wr_pool_len++;
+}
+
 static void finish_write(write_req_t* wr, int status) {
     if (wr->free_data && wr->data != NULL) {
         free(wr->data);
@@ -268,7 +295,7 @@ static void finish_write(write_req_t* wr, int status) {
 
     uv_tcp_t* client = wr->client;
     int keep_alive = wr->keep_alive;
-    free(wr);
+    wr_release(wr);
 
     if (client == NULL || uv_is_closing((uv_handle_t*)client)) {
         return;
@@ -331,7 +358,7 @@ static void send_response(uv_tcp_t* client, const char* response, size_t len,
         keep_alive = 0;
     }
 
-    write_req_t* wr = (write_req_t*)malloc(sizeof(write_req_t));
+    write_req_t* wr = wr_acquire();
     if (!wr) {
         if (owned == MOJO_RESP_OWNED && response != NULL) free((void*)response);
         if (!uv_is_closing((uv_handle_t*)client)) {
@@ -350,7 +377,7 @@ static void send_response(uv_tcp_t* client, const char* response, size_t len,
     int rc = uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_c);
     if (rc != 0) {
         if (wr->free_data && wr->data != NULL) free(wr->data);
-        free(wr);
+        wr_release(wr);
         if (!uv_is_closing((uv_handle_t*)client)) {
             uv_close((uv_handle_t*)client, on_close_c);
         }
@@ -486,7 +513,11 @@ static void alloc_buffer_c(uv_handle_t* handle, size_t suggested_size,
                            uv_buf_t* buf) {
     (void)handle;
     (void)suggested_size;
-    buf->base = (char*)malloc(READ_BUFFER_SIZE);
+    /* One buffer per thread (= per loop): the parser consumes it inside
+     * on_read_c and anything unparsed is copied into ctx->pending, so it
+     * can be reused for the next read. */
+    static _Thread_local char read_buf[READ_BUFFER_SIZE];
+    buf->base = read_buf;
     buf->len = READ_BUFFER_SIZE;
 }
 
@@ -515,7 +546,6 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
             uv_close((uv_handle_t*)client, on_close_c);
         }
     }
-    if (buf->base != NULL) free(buf->base);
 }
 
 static void on_connection_c(uv_stream_t* server, int status) {
@@ -782,7 +812,7 @@ void uv_read_stop_wrapper(uv_tcp_t* client) {
 void uv_write_wrapper(uv_tcp_t* client, const char* data, size_t len) {
     if (client == NULL || uv_is_closing((uv_handle_t*)client)) return;
 
-    write_req_t* wr = (write_req_t*)malloc(sizeof(write_req_t));
+    write_req_t* wr = wr_acquire();
     if (!wr) {
         if (!uv_is_closing((uv_handle_t*)client)) {
             uv_close((uv_handle_t*)client, on_close_c);
@@ -791,7 +821,7 @@ void uv_write_wrapper(uv_tcp_t* client, const char* data, size_t len) {
     }
     wr->data = (char*)malloc(len ? len : 1);
     if (!wr->data) {
-        free(wr);
+        wr_release(wr);
         if (!uv_is_closing((uv_handle_t*)client)) {
             uv_close((uv_handle_t*)client, on_close_c);
         }
@@ -807,7 +837,7 @@ void uv_write_wrapper(uv_tcp_t* client, const char* data, size_t len) {
     int rc = uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_c);
     if (rc != 0) {
         free(wr->data);
-        free(wr);
+        wr_release(wr);
         if (!uv_is_closing((uv_handle_t*)client)) {
             uv_close((uv_handle_t*)client, on_close_c);
         }
