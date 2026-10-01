@@ -82,6 +82,14 @@ Transfer/sec:     48.42MB
 ```
 And i will try to make **MORE RPS** cause I love **BLAZING** 🔥
 
+## Logging 📝
+
+Per-request logging is off by default (it costs ~20% throughput). Enable it at startup:
+
+```bash
+MOJELLY_LOG_LEVEL=1 ./server
+```
+
 ## What we use ⚙️
 Mojo language
 C language
