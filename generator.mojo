@@ -823,7 +823,8 @@ def main():
     print("🍇 Mojelly HTTP Server (Multithreaded)")
 
     var port: Int32 = 8080
-    var num_threads: Int32 = 4
+    # 0 = auto: one worker per allowed CPU, or MOJELLY_THREADS if set
+    var num_threads: Int32 = 0
 
     var layout = Layout[RouterHandlers].single()
     var alloc_result = alloc(layout)
@@ -838,7 +839,7 @@ ROUTES_PLACEHOLDER
 
     pthread_create_wrapper(port, router_void_fixed, num_threads)
 
-    print("✅ All", num_threads, "threads started")
+    print("✅ Worker threads started")
     print("🚀 Server listening on port", port)
 
     while True:
@@ -868,7 +869,7 @@ ROUTES_PLACEHOLDER
 # For cool guys only 😎
 # ============================================================
 
-from mojelly.http.request import HTTPRequest
+from mojelly.http.request import HTTPRequest, parse_header_block, parse_cookie_header
 from mojelly.http.response import HTTPResponse, get_status_phrase
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
@@ -955,6 +956,11 @@ def c_string_to_string(ptr: C_UInt8) -> String:
     var len = 0
     while ptr.unsafe_offset(len)[] != 0:
         len += 1
+    return bytes_to_string(ptr, len)
+
+# The C side knows the lengths, so no search for the terminator is needed
+# (and a NUL byte inside the data no longer ends it).
+def bytes_to_string(ptr: C_UInt8, len: Int) -> String:
     if len == 0:
         return ""
     var span = Span[UInt8](unsafe_ptr=ptr, length=len)
@@ -965,8 +971,7 @@ def string_to_c_string(s: String) -> C_UInt8:
     var bytes = s.as_bytes()
     var len = len(bytes)
     var ptr = external_call["malloc", C_UInt8, UInt64](UInt64(len + 1))
-    for i in range(len):
-        ptr.unsafe_offset(i).unsafe_write(bytes[i])
+    _ = external_call["memcpy", C_UInt8, C_UInt8, C_UInt8, UInt64](ptr, bytes.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutUntrackedOrigin](), UInt64(len))
     ptr.unsafe_offset(len).unsafe_write(0)
     return ptr
 
@@ -982,56 +987,46 @@ def mojo_handler(
     url_ptr: C_UInt8,
     method_ptr: C_UInt8,
     headers_ptr: C_UInt8,
-    body_ptr: C_UInt8
+    body_ptr: C_UInt8,
+    out_len: Pointer[UInt64, MutUntrackedOrigin],
+    out_ownership: Pointer[Int32, MutUntrackedOrigin],
+    url_len: UInt64,
+    headers_len: UInt64,
+    body_len: UInt64
 ) abi("C") -> C_UInt8:
+    # The response is malloc'ed here and freed by the C side (MOJO_RESP_OWNED = 0);
+    # its real length goes to out_len so bodies containing NUL bytes survive.
+    out_ownership[] = 0
 
     if not router_ptr:
         var err_response = "HTTP/1.1 500 Internal Server Error\\r\\n\\r\\n"
+        out_len[] = UInt64(err_response.byte_length())
         return string_to_c_string(err_response)
 
     var router = router_ptr.value()
-    var url = c_string_to_string(url_ptr)
+    var url = bytes_to_string(url_ptr, Int(url_len))
     var method = c_string_to_string(method_ptr)
-    var headers_str = c_string_to_string(headers_ptr)
-    var body = c_string_to_string(body_ptr)
+    var headers_str = bytes_to_string(headers_ptr, Int(headers_len))
+    var body = bytes_to_string(body_ptr, Int(body_len))
 
     var request = HTTPRequest(url=url, method=method)
     request.body = body
 
-    if headers_str != "":
-        for line_span in headers_str.split("\\r\\n"):
-            var line = String(line_span)
-            var colon = line.find(":")
-            if colon != -1:
-                var key = String(line[byte=0:colon]).strip()
-                var val = String(line[byte=colon + 1:len(line.as_bytes())]).strip()
-                request.headers[String(key)] = String(val)
+    parse_header_block(headers_str, request.headers)
 
-    var cookie_header = request.headers.get("Cookie", "")
+    var cookie_header = request.get_header("Cookie")
     if cookie_header != "":
-        for cookie_span in cookie_header.split(";"):
-            var cookie = String(cookie_span).strip()
-            var eq = cookie.find("=")
-            if eq != -1:
-                var name_span = cookie[byte=0:eq].strip()
-                var value_span = cookie[byte=eq + 1:len(cookie.as_bytes())].strip()
-                var name = String()
-                for i in range(len(name_span.as_bytes())):
-                    name += chr(Int(name_span.as_bytes()[i]))
-                var value = String()
-                for i in range(len(value_span.as_bytes())):
-                    value += chr(Int(value_span.as_bytes()[i]))
-                request.cookies[name] = value
+        parse_cookie_header(cookie_header, request.cookies)
 
     var router_response = router[].handle(request)
 
-    var body_len = router_response.body.byte_length()
-    var http_response = String()
+    var resp_body_len = router_response.body.byte_length()
+    var http_response = String(capacity=resp_body_len + 256)
     http_response += "HTTP/1.1 "
     http_response += String(router_response.status)
     http_response += " " + get_status_phrase(router_response.status) + "\\r\\n"
     http_response += "Content-Type: " + router_response.content_type + "\\r\\n"
-    http_response += "Content-Length: " + String(body_len) + "\\r\\n"
+    http_response += "Content-Length: " + String(resp_body_len) + "\\r\\n"
     http_response += "Connection: keep-alive\\r\\n"
 
     for header_key in router_response.headers.keys():
@@ -1041,6 +1036,7 @@ def mojo_handler(
         http_response += "Set-Cookie: " + cookie + "\\r\\n"
     http_response += "\\r\\n"
     http_response += router_response.body
+    out_len[] = UInt64(http_response.byte_length())
     var result = string_to_c_string(http_response)
     return result
 

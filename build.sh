@@ -113,6 +113,9 @@ if [ "$NEED_REBUILD" = true ]; then
         -fPIC \
         2>/dev/null || echo "⚠️ bridge_ssl.c not found or failed to compile"
 
+    # Start from an empty archive: ar rcs only adds/replaces members, so a
+    # stale object (e.g. from another bridge) would otherwise stay linked in.
+    rm -f ../lib/libmojelly.a
     ar rcs ../lib/libmojelly.a bridge.o bridge_ssl.o 2>/dev/null || ar rcs ../lib/libmojelly.a bridge.o
     rm -f bridge.o bridge_ssl.o 2>/dev/null
     cd ..
