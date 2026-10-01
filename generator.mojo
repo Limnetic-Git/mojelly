@@ -869,7 +869,7 @@ ROUTES_PLACEHOLDER
 # For cool guys only 😎
 # ============================================================
 
-from mojelly.http.request import HTTPRequest
+from mojelly.http.request import HTTPRequest, parse_header_block, parse_cookie_header
 from mojelly.http.response import HTTPResponse, get_status_phrase
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
@@ -1004,30 +1004,11 @@ def mojo_handler(
     var request = HTTPRequest(url=url, method=method)
     request.body = body
 
-    if headers_str != "":
-        for line_span in headers_str.split("\\r\\n"):
-            var line = String(line_span)
-            var colon = line.find(":")
-            if colon != -1:
-                var key = String(line[byte=0:colon]).strip()
-                var val = String(line[byte=colon + 1:len(line.as_bytes())]).strip()
-                request.headers[String(key)] = String(val)
+    parse_header_block(headers_str, request.headers)
 
     var cookie_header = request.headers.get("Cookie", "")
     if cookie_header != "":
-        for cookie_span in cookie_header.split(";"):
-            var cookie = String(cookie_span).strip()
-            var eq = cookie.find("=")
-            if eq != -1:
-                var name_span = cookie[byte=0:eq].strip()
-                var value_span = cookie[byte=eq + 1:len(cookie.as_bytes())].strip()
-                var name = String()
-                for i in range(len(name_span.as_bytes())):
-                    name += chr(Int(name_span.as_bytes()[i]))
-                var value = String()
-                for i in range(len(value_span.as_bytes())):
-                    value += chr(Int(value_span.as_bytes()[i]))
-                request.cookies[name] = value
+        parse_cookie_header(cookie_header, request.cookies)
 
     var router_response = router[].handle(request)
 
