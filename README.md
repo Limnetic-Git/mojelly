@@ -111,6 +111,17 @@ Safe defaults, overridable with environment variables at startup:
 
 Timeouts are checked once a second, so they are accurate to about one second.
 
+## Performance CI 📈
+
+Every PR to `main` or `dev` is benchmarked by `.github/workflows/perf.yml`: the **PR head**, **dev** and **main** are built and measured one after another on the same runner, and the result is posted as a PR comment. For each scenario (`/json` with 100 and 500 connections, a new connection per request, browser-like headers and cookies, a larger `/html` body) it shows requests/s, p99 latency and server CPU per request, and the PR's change against `dev` and `main`. The job fails if the PR is more than 15% slower than its base branch and the change is larger than the run-to-run noise.
+
+Run it locally (needs [`oha`](https://github.com/hatoo/oha) and a built `./server` in each directory):
+
+```bash
+python3 scripts/perf_run.py --build main=../main --build dev=../dev --build pr=. --out results.json
+python3 scripts/perf_report.py results.json --pr pr --base dev
+```
+
 ## What we use ⚙️
 Mojo language
 C language
