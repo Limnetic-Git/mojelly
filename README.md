@@ -98,6 +98,19 @@ By default Mojelly starts one worker per CPU the process is allowed to use (so `
 MOJELLY_THREADS=4 ./server
 ```
 
+## Limits and timeouts 🛡️
+
+Safe defaults, overridable with environment variables at startup:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MOJELLY_MAX_HEADER_SIZE` | 65536 | URL + headers of one request, bytes (over → `431`) |
+| `MOJELLY_MAX_BODY` | 10485760 | request body, bytes (over → `413`) |
+| `MOJELLY_IDLE_TIMEOUT` | 60 | seconds without traffic before a connection is closed (`0` = off) |
+| `MOJELLY_REQUEST_TIMEOUT` | 30 | seconds allowed to receive one complete request (`0` = off) |
+
+Timeouts are checked once a second, so they are accurate to about one second.
+
 ## What we use ⚙️
 Mojo language
 C language

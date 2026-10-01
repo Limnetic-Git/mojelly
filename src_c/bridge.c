@@ -31,7 +31,19 @@ static int g_log_level = 0;
 #define LISTEN_BACKLOG 1024
 #define HTTP_STATUS_DIGITS 3
 #define HTTP_VERSION_PREFIX_LEN 9        /* strlen("HTTP/1.1 ") */
-#define BODY_PRERESERVE_MAX (1ULL << 30) /* 1 GiB cap for pre-reserve */
+#define BODY_PRERESERVE_MAX (64ULL << 10) /* reserve at most 64 KiB up front;
+                                             larger bodies grow as data arrives */
+
+/* Limits, overridable at startup (0 disables the timeouts):
+ *   MOJELLY_MAX_HEADER_SIZE   url + headers of one request, bytes (default 64 KiB)
+ *   MOJELLY_MAX_BODY          request body, bytes             (default 10 MiB)
+ *   MOJELLY_IDLE_TIMEOUT      seconds without any traffic     (default 60)
+ *   MOJELLY_REQUEST_TIMEOUT   seconds to receive one request  (default 30)
+ */
+static size_t g_max_header_size = 64UL << 10;
+static size_t g_max_body_size = 10UL << 20;
+static long g_idle_timeout_ms = 60 * 1000;
+static long g_request_timeout_ms = 30 * 1000;
 
 #if LOG_COLORS
 #define COLOR_RESET "\033[0m"
@@ -150,6 +162,15 @@ static int on_message_complete_c(llhttp_t* parser);
 static void mojelly_init_settings(void) {
     const char* lvl = getenv("MOJELLY_LOG_LEVEL");
     if (lvl != NULL) g_log_level = atoi(lvl);
+    const char* v;
+    if ((v = getenv("MOJELLY_MAX_HEADER_SIZE")) && atol(v) > 0)
+        g_max_header_size = (size_t)atol(v);
+    if ((v = getenv("MOJELLY_MAX_BODY")) && atol(v) > 0)
+        g_max_body_size = (size_t)atol(v);
+    if ((v = getenv("MOJELLY_IDLE_TIMEOUT")) && atol(v) >= 0)
+        g_idle_timeout_ms = atol(v) * 1000;
+    if ((v = getenv("MOJELLY_REQUEST_TIMEOUT")) && atol(v) >= 0)
+        g_request_timeout_ms = atol(v) * 1000;
     llhttp_settings_init(&g_settings);
     g_settings.on_message_begin = on_message_begin_c;
     g_settings.on_url = on_url_c;
@@ -166,7 +187,7 @@ static inline void ensure_settings_init(void) {
 
 /* ---------- client ctx ---------- */
 
-typedef struct {
+typedef struct client_ctx {
     uv_tcp_t client;
     llhttp_t parser;
     buffer_t url;
@@ -177,6 +198,13 @@ typedef struct {
     int keep_alive;
     int processing; /* 1 while a response write is in flight */
     void* router;
+    int reject_status; /* 413 / 431 set by a parser callback that refused */
+    /* Timeouts: bookkeeping for the per-thread sweep timer. */
+    uint64_t last_active_ms;
+    uint64_t request_started_ms; /* 0 = no request in progress */
+    int linked;
+    struct client_ctx* prev;
+    struct client_ctx* next;
 } client_ctx_t;
 
 typedef struct {
@@ -196,6 +224,16 @@ typedef struct {
 
 static const char* http_500 =
     "HTTP/1.1 500 Internal Server Error\r\n"
+    "Content-Length: 0\r\n"
+    "Connection: close\r\n\r\n";
+
+static const char* http_413 =
+    "HTTP/1.1 413 Payload Too Large\r\n"
+    "Content-Length: 0\r\n"
+    "Connection: close\r\n\r\n";
+
+static const char* http_431 =
+    "HTTP/1.1 431 Request Header Fields Too Large\r\n"
     "Content-Length: 0\r\n"
     "Connection: close\r\n\r\n";
 
@@ -245,9 +283,29 @@ static void log_request(const char* method, const char* url, int status,
 
 /* ---------- close / write ---------- */
 
+/* Connections of the current thread (one libuv loop per thread). */
+static _Thread_local client_ctx_t* conn_list = NULL;
+
+static void conn_link(client_ctx_t* ctx) {
+    ctx->prev = NULL;
+    ctx->next = conn_list;
+    if (conn_list) conn_list->prev = ctx;
+    conn_list = ctx;
+    ctx->linked = 1;
+}
+
+static void conn_unlink(client_ctx_t* ctx) {
+    if (!ctx->linked) return;
+    if (ctx->prev) ctx->prev->next = ctx->next;
+    else conn_list = ctx->next;
+    if (ctx->next) ctx->next->prev = ctx->prev;
+    ctx->linked = 0;
+}
+
 static void on_close_c(uv_handle_t* handle) {
     client_ctx_t* ctx = (client_ctx_t*)handle->data;
     if (ctx != NULL) {
+        conn_unlink(ctx);
         buf_free(&ctx->url);
         buf_free(&ctx->headers);
         buf_free(&ctx->body);
@@ -259,6 +317,15 @@ static void on_close_c(uv_handle_t* handle) {
 static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
 static void send_response(uv_tcp_t* client, const char* response, size_t len,
                           int keep_alive, int owned);
+
+/* Answer a parser failure: 431 / 413 if a callback refused the request for
+ * size reasons, 400 otherwise. The connection is closed after the reply. */
+static void send_parse_error(client_ctx_t* ctx) {
+    const char* resp = http_400;
+    if (ctx->reject_status == 431) resp = http_431;
+    else if (ctx->reject_status == 413) resp = http_413;
+    send_response(&ctx->client, resp, strlen(resp), 0, MOJO_RESP_BORROWED);
+}
 
 /* Free-list of write requests, per thread: avoids a malloc/free pair per
  * response. Several writes can be in flight on one connection (pipelining),
@@ -309,10 +376,12 @@ static void finish_write(write_req_t* wr, int status) {
     }
 
     if (ctx != NULL) {
+        ctx->last_active_ms = uv_now(client->loop);
         buf_reset(&ctx->url);
         buf_reset(&ctx->headers);
         buf_reset(&ctx->body);
         ctx->header_state = HEADER_STATE_NONE;
+        ctx->reject_status = 0;
         llhttp_init(&ctx->parser, HTTP_REQUEST, &g_settings);
         ctx->parser.data = ctx;
         ctx->processing = 0;
@@ -324,8 +393,7 @@ static void finish_write(write_req_t* wr, int status) {
             enum llhttp_errno err = llhttp_execute(&ctx->parser, pdata, plen);
             buf_reset(&ctx->pending);
             if (err != HPE_OK) {
-                send_response(client, http_400, strlen(http_400), 0,
-                              MOJO_RESP_OWNED);
+                send_parse_error(ctx);
             }
         }
     }
@@ -354,7 +422,7 @@ static void send_response(uv_tcp_t* client, const char* response, size_t len,
     if (response == NULL) {
         response = http_500;
         len = strlen(http_500);
-        owned = MOJO_RESP_OWNED;
+        owned = MOJO_RESP_BORROWED; /* static literal: must not be freed */
         keep_alive = 0;
     }
 
@@ -404,6 +472,7 @@ static int extract_status_from_response(const char* response) {
 
 static int on_message_begin_c(llhttp_t* parser) {
     client_ctx_t* ctx = (client_ctx_t*)parser->data;
+    ctx->reject_status = 0;
     buf_reset(&ctx->url);
     buf_reset(&ctx->headers);
     buf_reset(&ctx->body);
@@ -411,8 +480,18 @@ static int on_message_begin_c(llhttp_t* parser) {
     return 0;
 }
 
+/* Refuse the request (431) once url + headers exceed the configured limit. */
+static int check_header_limit(client_ctx_t* ctx, size_t extra) {
+    if (ctx->url.len + ctx->headers.len + extra > g_max_header_size) {
+        ctx->reject_status = 431;
+        return -1;
+    }
+    return 0;
+}
+
 static int on_url_c(llhttp_t* parser, const char* at, size_t length) {
     client_ctx_t* ctx = (client_ctx_t*)parser->data;
+    if (check_header_limit(ctx, length) != 0) return -1;
     return buf_append(&ctx->url, at, length);
 }
 
@@ -422,6 +501,7 @@ static int on_header_field_c(llhttp_t* parser, const char* at, size_t length) {
         if (buf_append(&ctx->headers, "\r\n", 2) != 0) return -1;
     }
     ctx->header_state = HEADER_STATE_FIELD;
+    if (check_header_limit(ctx, length + 2) != 0) return -1;
     return buf_append(&ctx->headers, at, length);
 }
 
@@ -431,6 +511,7 @@ static int on_header_value_c(llhttp_t* parser, const char* at, size_t length) {
         if (buf_append(&ctx->headers, ": ", 2) != 0) return -1;
     }
     ctx->header_state = HEADER_STATE_VALUE;
+    if (check_header_limit(ctx, length + 2) != 0) return -1;
     return buf_append(&ctx->headers, at, length);
 }
 
@@ -442,16 +523,28 @@ static int on_headers_complete_c(llhttp_t* parser) {
     ctx->header_state = HEADER_STATE_NONE;
     ctx->keep_alive = llhttp_should_keep_alive(parser);
 
-    /* Pre-reserve body if Content-Length is known - avoids O(n^2) growth. */
+    /* Refuse oversized bodies up front (413), without reading them. */
     uint64_t cl = parser->content_length;
-    if (cl != ULLONG_MAX && cl > 0 && cl < BODY_PRERESERVE_MAX) {
-        if (buf_reserve(&ctx->body, (size_t)cl + 1) != 0) return -1;
+    if (cl != ULLONG_MAX && cl > g_max_body_size) {
+        ctx->reject_status = 413;
+        return -1;
+    }
+    /* Pre-reserve a bounded amount so a bogus Content-Length cannot make us
+     * allocate its full size before any body byte arrives; the buffer grows
+     * geometrically as data comes in. */
+    if (cl != ULLONG_MAX && cl > 0) {
+        size_t want = cl < BODY_PRERESERVE_MAX ? (size_t)cl : BODY_PRERESERVE_MAX;
+        if (buf_reserve(&ctx->body, want + 1) != 0) return -1;
     }
     return 0;
 }
 
 static int on_body_c(llhttp_t* parser, const char* at, size_t length) {
     client_ctx_t* ctx = (client_ctx_t*)parser->data;
+    if (ctx->body.len + length > g_max_body_size) { /* chunked bodies */
+        ctx->reject_status = 413;
+        return -1;
+    }
     return buf_append(&ctx->body, at, length);
 }
 
@@ -461,11 +554,12 @@ static int on_message_complete_c(llhttp_t* parser) {
 
     if (router == NULL) {
         send_response(&ctx->client, http_500, strlen(http_500), 0,
-                      MOJO_RESP_OWNED);
+                      MOJO_RESP_BORROWED);
         return 0;
     }
 
     request_count++;
+    ctx->request_started_ms = 0; /* request fully received */
 
     /* Block re-entering the parser until the response write completes. */
     ctx->processing = 1;
@@ -500,7 +594,7 @@ static int on_message_complete_c(llhttp_t* parser) {
         send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
     } else {
         send_response(&ctx->client, http_500, strlen(http_500), 0,
-                      MOJO_RESP_OWNED);
+                      MOJO_RESP_BORROWED);
     }
 
     if (log_on) log_request(method, url, status, duration_ms);
@@ -525,19 +619,29 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
     if (nread > 0) {
         client_ctx_t* ctx = (client_ctx_t*)client->data;
         if (ctx != NULL) {
+            uint64_t now = uv_now(client->loop);
+            ctx->last_active_ms = now;
+            if (ctx->request_started_ms == 0 && !ctx->processing) {
+                ctx->request_started_ms = now;
+            }
             if (ctx->processing) {
-                /* Parser is busy — accumulate for later. OOM -> 500 & close. */
-                if (buf_append(&ctx->pending, buf->base, (size_t)nread) != 0) {
+                /* Parser is busy - accumulate for later, but never more than
+                 * one maximal request. OOM or over the cap -> reply and close. */
+                if (ctx->pending.len + (size_t)nread >
+                    g_max_header_size + g_max_body_size) {
+                    ctx->reject_status = 413;
+                    send_parse_error(ctx);
+                } else if (buf_append(&ctx->pending, buf->base,
+                                      (size_t)nread) != 0) {
                     send_response((uv_tcp_t*)client, http_500, strlen(http_500),
-                                  0, MOJO_RESP_OWNED);
+                                  0, MOJO_RESP_BORROWED);
                 }
             } else {
                 enum llhttp_errno err =
                     llhttp_execute(&ctx->parser, buf->base, (size_t)nread);
                 if (err != HPE_OK) {
                     /* keep_alive = 0 -> connection will be closed. */
-                    send_response((uv_tcp_t*)client, http_400, strlen(http_400),
-                                  0, MOJO_RESP_OWNED);
+                    send_parse_error(ctx);
                 }
             }
         }
@@ -545,6 +649,26 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
         if (!uv_is_closing((uv_handle_t*)client)) {
             uv_close((uv_handle_t*)client, on_close_c);
         }
+    }
+}
+
+/* Per-thread sweep: closes connections that were idle for too long or are
+ * taking too long to deliver a complete request (slowloris). Runs once a
+ * second; the granularity of the timeouts is therefore ~1 s. */
+static void sweep_timeouts_c(uv_timer_t* timer) {
+    uint64_t now = uv_now(timer->loop);
+    client_ctx_t* c = conn_list;
+    while (c != NULL) {
+        client_ctx_t* next = c->next; /* uv_close does not unlink, but be safe */
+        if (!uv_is_closing((uv_handle_t*)&c->client)) {
+            int idle = g_idle_timeout_ms > 0 &&
+                       now - c->last_active_ms > (uint64_t)g_idle_timeout_ms;
+            int slow = g_request_timeout_ms > 0 && c->request_started_ms != 0 &&
+                       now - c->request_started_ms >
+                           (uint64_t)g_request_timeout_ms;
+            if (idle || slow) uv_close((uv_handle_t*)&c->client, on_close_c);
+        }
+        c = next;
     }
 }
 
@@ -569,6 +693,7 @@ static void on_connection_c(uv_stream_t* server, int status) {
     buf_init(&ctx->pending);
     ctx->header_state = HEADER_STATE_NONE;
     ctx->processing = 0;
+    ctx->last_active_ms = uv_now(server->loop);
 
     llhttp_init(&ctx->parser, HTTP_REQUEST, &g_settings);
     ctx->parser.data = ctx;
@@ -577,6 +702,7 @@ static void on_connection_c(uv_stream_t* server, int status) {
         uv_close((uv_handle_t*)&ctx->client, on_close_c);
         return;
     }
+    conn_link(ctx);
 
     /* TCP_NODELAY must be set AFTER accept */
     int fd = -1;
@@ -719,6 +845,15 @@ static void* thread_main(void* arg) {
         return NULL;
     }
 
+    uv_timer_t* sweep = NULL;
+    if (g_idle_timeout_ms > 0 || g_request_timeout_ms > 0) {
+        sweep = (uv_timer_t*)malloc(sizeof(uv_timer_t));
+        if (sweep != NULL) {
+            uv_timer_init(loop, sweep);
+            uv_timer_start(sweep, sweep_timeouts_c, 1000, 1000);
+        }
+    }
+
     printf("[C] 🧵 Thread %d listening on CPU %d (port %d)\n", args->thread_id,
            cpu_id, args->port);
     fflush(stdout);
@@ -730,6 +865,7 @@ static void* thread_main(void* arg) {
     uv_run(loop, UV_RUN_DEFAULT);
     uv_loop_close(loop);
     free(loop);
+    free(sweep);
     free(server);
     free(args);
 

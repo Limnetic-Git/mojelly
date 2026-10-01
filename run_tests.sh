@@ -56,6 +56,15 @@ else
     FAILED_TESTS=$((FAILED_TESTS + 1))
 fi
 
+# 3. Limits / timeouts / malformed requests (starts its own server)
+echo -e "${BLUE}--- 3. Limits & Timeouts Integration Suite ---${NC}"
+if python3 tests/test_limits_e2e.py; then
+    echo -e "${GREEN}✔ Limits & Timeouts Suite passed${NC}\n"
+else
+    echo -e "${RED}✘ Limits & Timeouts Suite failed${NC}\n"
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+
 echo -e "${BLUE}=========================================="
 if [ $FAILED_TESTS -eq 0 ]; then
     echo -e "${GREEN}🎉 All test suites passed successfully! (100% Coverage)${NC}"
