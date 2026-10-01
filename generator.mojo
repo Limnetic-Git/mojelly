@@ -956,6 +956,11 @@ def c_string_to_string(ptr: C_UInt8) -> String:
     var len = 0
     while ptr.unsafe_offset(len)[] != 0:
         len += 1
+    return bytes_to_string(ptr, len)
+
+# The C side knows the lengths, so no search for the terminator is needed
+# (and a NUL byte inside the data no longer ends it).
+def bytes_to_string(ptr: C_UInt8, len: Int) -> String:
     if len == 0:
         return ""
     var span = Span[UInt8](unsafe_ptr=ptr, length=len)
@@ -984,7 +989,10 @@ def mojo_handler(
     headers_ptr: C_UInt8,
     body_ptr: C_UInt8,
     out_len: Pointer[UInt64, MutUntrackedOrigin],
-    out_ownership: Pointer[Int32, MutUntrackedOrigin]
+    out_ownership: Pointer[Int32, MutUntrackedOrigin],
+    url_len: UInt64,
+    headers_len: UInt64,
+    body_len: UInt64
 ) abi("C") -> C_UInt8:
     # The response is malloc'ed here and freed by the C side (MOJO_RESP_OWNED = 0);
     # its real length goes to out_len so bodies containing NUL bytes survive.
@@ -996,10 +1004,10 @@ def mojo_handler(
         return string_to_c_string(err_response)
 
     var router = router_ptr.value()
-    var url = c_string_to_string(url_ptr)
+    var url = bytes_to_string(url_ptr, Int(url_len))
     var method = c_string_to_string(method_ptr)
-    var headers_str = c_string_to_string(headers_ptr)
-    var body = c_string_to_string(body_ptr)
+    var headers_str = bytes_to_string(headers_ptr, Int(headers_len))
+    var body = bytes_to_string(body_ptr, Int(body_len))
 
     var request = HTTPRequest(url=url, method=method)
     request.body = body
@@ -1012,13 +1020,13 @@ def mojo_handler(
 
     var router_response = router[].handle(request)
 
-    var body_len = router_response.body.byte_length()
-    var http_response = String()
+    var resp_body_len = router_response.body.byte_length()
+    var http_response = String(capacity=resp_body_len + 256)
     http_response += "HTTP/1.1 "
     http_response += String(router_response.status)
     http_response += " " + get_status_phrase(router_response.status) + "\\r\\n"
     http_response += "Content-Type: " + router_response.content_type + "\\r\\n"
-    http_response += "Content-Length: " + String(body_len) + "\\r\\n"
+    http_response += "Content-Length: " + String(resp_body_len) + "\\r\\n"
     http_response += "Connection: keep-alive\\r\\n"
 
     for header_key in router_response.headers.keys():

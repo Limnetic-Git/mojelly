@@ -85,6 +85,18 @@ def run_tests():
                 f"got {raw!r}",
             )
 
+        # 1c. Request body with an embedded NUL byte is passed in full
+        req = urllib.request.Request(
+            f"{SERVER_URL}/echo", data=b"A\x00B", method="POST"
+        )
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read()
+            assert_test(
+                "POST /echo keeps bytes after NUL in the request body",
+                raw == b"3:A\x00B",
+                f"got {raw!r}",
+            )
+
         # 2. GET /json
         req = urllib.request.Request(f"{SERVER_URL}/json")
         with urllib.request.urlopen(req) as resp:
