@@ -1006,7 +1006,7 @@ def mojo_handler(
 
     parse_header_block(headers_str, request.headers)
 
-    var cookie_header = request.headers.get("Cookie", "")
+    var cookie_header = request.get_header("Cookie")
     if cookie_header != "":
         parse_cookie_header(cookie_header, request.cookies)
 

@@ -46,7 +46,16 @@ struct HTTPRequest:
         self.params = Dict[String, String]()
 
     def get_header(self, name: String) -> String:
-        return self.headers.get(name, "")
+        """Header lookup, case-insensitive as HTTP requires. Names are stored
+        as the client sent them; the exact spelling is tried first."""
+        var exact = self.headers.get(name)
+        if exact:
+            return exact.value()
+        var wanted = name.lower()
+        for key in self.headers.keys():
+            if key.lower() == wanted:
+                return self.headers.get(key, "")
+        return ""
 
     def get_cookie(self, name: String) -> String:
         return self.cookies.get(name, "")
