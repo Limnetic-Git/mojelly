@@ -51,9 +51,8 @@ struct HTTPRequest:
         var exact = self.headers.get(name)
         if exact:
             return exact.value()
-        var wanted = name.lower()
         for key in self.headers.keys():
-            if key.lower() == wanted:
+            if _equal_ignore_case(key, name):
                 return self.headers.get(key, "")
         return ""
 
@@ -80,6 +79,24 @@ struct HTTPRequest:
 
     def has_param(self, name: String) -> Bool:
         return name in self.params
+
+
+def _equal_ignore_case(a: String, b: String) -> Bool:
+    """ASCII case-insensitive equality without allocating."""
+    var x = a.as_bytes()
+    var y = b.as_bytes()
+    if len(x) != len(y):
+        return False
+    for i in range(len(x)):
+        var c = x[i]
+        var d = y[i]
+        if c >= 65 and c <= 90:
+            c += 32
+        if d >= 65 and d <= 90:
+            d += 32
+        if c != d:
+            return False
+    return True
 
 
 comptime _SP: UInt8 = 32
