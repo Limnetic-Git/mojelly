@@ -17,10 +17,11 @@
 #include <unistd.h>
 #include <uv.h>
 
-#define LOG_LEVEL 1
-// 0 - Errors only (recommended for best performance)
-// 1 - Requests logs (recommended for default use)
-// 2 - All logs (use for debug only)
+/* Log level is read at startup from the MOJELLY_LOG_LEVEL env variable:
+ *   0 - no per-request logs (default, best performance)
+ *   1 - one line per request
+ */
+static int g_log_level = 0;
 
 #define LOG_COLORS 1
 // 0 - u are boring, but little bit faster
@@ -147,6 +148,8 @@ static int on_body_c(llhttp_t* parser, const char* at, size_t length);
 static int on_message_complete_c(llhttp_t* parser);
 
 static void mojelly_init_settings(void) {
+    const char* lvl = getenv("MOJELLY_LOG_LEVEL");
+    if (lvl != NULL) g_log_level = atoi(lvl);
     llhttp_settings_init(&g_settings);
     g_settings.on_message_begin = on_message_begin_c;
     g_settings.on_url = on_url_c;
@@ -201,7 +204,6 @@ static const char* http_400 =
     "Content-Length: 0\r\n"
     "Connection: close\r\n\r\n";
 
-#if LOG_LEVEL >= 1
 static const char* get_method_color(const char* method) {
     if (strcmp(method, "GET") == 0) return COLOR_CYAN;
     if (strcmp(method, "POST") == 0) return COLOR_GREEN;
@@ -224,19 +226,22 @@ static void log_request(const char* method, const char* url, int status,
     const char* method_color = get_method_color(method);
     const char* status_color = get_status_color(status);
 
+    /* Format the time at most once per second per thread. */
+    static _Thread_local time_t cached_at = 0;
+    static _Thread_local char time_str[20] = "00:00:00";
     time_t now = time(NULL);
-    struct tm tm_info;
-    localtime_r(&now, &tm_info);
-    char time_str[20];
-    strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_info);
+    if (now != cached_at) {
+        struct tm tm_info;
+        localtime_r(&now, &tm_info);
+        strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_info);
+        cached_at = now;
+    }
 
     printf("[%s] [T%d] %s%s%s %s%s%s %s%d%s %.2fms\n", time_str,
            current_thread_id, method_color, method, COLOR_RESET, COLOR_BOLD,
            url, COLOR_RESET, status_color, status, COLOR_RESET, duration_ms);
 }
-#else
-#define log_request(method, url, status, duration_ms) ((void)0)
-#endif
+
 
 /* ---------- close / write ---------- */
 
@@ -444,16 +449,20 @@ static int on_message_complete_c(llhttp_t* parser) {
     const char* body = ctx->body.data ? ctx->body.data : "";
 
     struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
+    int log_on = g_log_level >= 1;
+    if (log_on) clock_gettime(CLOCK_MONOTONIC, &start);
 
     size_t resp_len = 0;
     int resp_owned = MOJO_RESP_OWNED;
     char* response = mojo_handler(router, url, method, headers, body, &resp_len,
                                   &resp_owned);
 
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    double duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
-                         (end.tv_nsec - start.tv_nsec) / 1000000.0;
+    double duration_ms = 0;
+    if (log_on) {
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
+                      (end.tv_nsec - start.tv_nsec) / 1000000.0;
+    }
 
     int status = 500;
     int keep_alive = ctx->keep_alive;
@@ -467,7 +476,7 @@ static int on_message_complete_c(llhttp_t* parser) {
                       MOJO_RESP_OWNED);
     }
 
-    log_request(method, url, status, duration_ms);
+    if (log_on) log_request(method, url, status, duration_ms);
     return 0;
 }
 
