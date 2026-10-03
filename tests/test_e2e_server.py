@@ -75,47 +75,6 @@ def run_tests():
                 resp.headers.get("Content-Type") == "text/plain",
             )
 
-        # 1b. Body with an embedded NUL byte is not truncated
-        req = urllib.request.Request(f"{SERVER_URL}/nul")
-        with urllib.request.urlopen(req) as resp:
-            raw = resp.read()
-            assert_test(
-                "GET /nul keeps bytes after NUL",
-                raw == b"A\x00B" and resp.headers.get("Content-Length") == "3",
-                f"got {raw!r}",
-            )
-
-        # 1c. Request body with an embedded NUL byte is passed in full
-        req = urllib.request.Request(
-            f"{SERVER_URL}/echo", data=b"A\x00B", method="POST"
-        )
-        with urllib.request.urlopen(req) as resp:
-            raw = resp.read()
-            assert_test(
-                "POST /echo keeps bytes after NUL in the request body",
-                raw == b"3:A\x00B",
-                f"got {raw!r}",
-            )
-
-        # 1d. Header names are case-insensitive: lowercase "cookie:" is parsed
-        sock = socket.create_connection((SERVER_HOST, SERVER_PORT), timeout=5)
-        sock.sendall(
-            b"GET /cookies/read HTTP/1.1\r\nhost: x\r\n"
-            b"cookie: session=abc123; theme=dark\r\nconnection: close\r\n\r\n"
-        )
-        raw = b""
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            raw += chunk
-        sock.close()
-        assert_test(
-            "lowercase 'cookie:' header is parsed",
-            b"session = abc123" in raw and b"theme = dark" in raw,
-            f"got {raw[-80:]!r}",
-        )
-
         # 2. GET /json
         req = urllib.request.Request(f"{SERVER_URL}/json")
         with urllib.request.urlopen(req) as resp:

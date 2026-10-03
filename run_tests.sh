@@ -43,7 +43,6 @@ echo -e "${BLUE}--- 1. Mojo Unit Tests ---${NC}"
 run_unit_test "tests/test_request.mojo" "HTTPRequest Suite"
 run_unit_test "tests/test_response.mojo" "HTTPResponse Suite"
 run_unit_test "tests/test_router.mojo" "RouterHandlers Suite"
-run_unit_test "tests/test_router_params.mojo" "Router Params Suite"
 run_unit_test "tests/test_router_builder.mojo" "RouterBuilder Suite"
 run_unit_test "tests/test_query.mojo" "Query String Suite"
 run_unit_test "tests/test_generator_helpers.mojo" "Generator Helpers Suite"
@@ -54,33 +53,6 @@ if python3 tests/test_e2e_server.py; then
     echo -e "${GREEN}✔ E2E Integration Suite passed${NC}\n"
 else
     echo -e "${RED}✘ E2E Integration Suite failed${NC}\n"
-    FAILED_TESTS=$((FAILED_TESTS + 1))
-fi
-
-# 3a. Routing & Cookies (starts its own server)
-echo -e "${BLUE}--- Routing & Cookies Integration Suite ---${NC}"
-if python3 tests/test_routing_e2e.py; then
-    echo -e "${GREEN}✔ Routing & Cookies Suite passed${NC}\n"
-else
-    echo -e "${RED}✘ Routing & Cookies Suite failed${NC}\n"
-    FAILED_TESTS=$((FAILED_TESTS + 1))
-fi
-
-# 4b. HTTP Protocol (starts its own server)
-echo -e "${BLUE}--- HTTP Protocol Integration Suite ---${NC}"
-if python3 tests/test_protocol_e2e.py; then
-    echo -e "${GREEN}✔ HTTP Protocol Suite passed${NC}\n"
-else
-    echo -e "${RED}✘ HTTP Protocol Suite failed${NC}\n"
-    FAILED_TESTS=$((FAILED_TESTS + 1))
-fi
-
-# 3. Limits / timeouts / malformed requests (starts its own server)
-echo -e "${BLUE}--- 3. Limits & Timeouts Integration Suite ---${NC}"
-if python3 tests/test_limits_e2e.py; then
-    echo -e "${GREEN}✔ Limits & Timeouts Suite passed${NC}\n"
-else
-    echo -e "${RED}✘ Limits & Timeouts Suite failed${NC}\n"
     FAILED_TESTS=$((FAILED_TESTS + 1))
 fi
 

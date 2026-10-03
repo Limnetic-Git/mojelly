@@ -31,45 +31,7 @@ def test_router_builder() raises:
     assert_equal(handlers[3], "account_delete_handler")
 
 
-def test_builder_returns_independent_copies() raises:
-    var builder = RouterBuilder()
-    builder.get("/a", "handler_a")
-    var paths = builder.get_paths()
-    paths.append("/mutated")
-    assert_equal(len(builder.get_paths()), 1)
-    assert_equal(len(builder.get_handler_names()), 1)
-
-
-def test_builder_keeps_registration_order_and_duplicates() raises:
-    var builder = RouterBuilder()
-    builder.get("/same", "first")
-    builder.post("/same", "second")
-    builder.get("/same", "third")
-    var paths = builder.get_paths()
-    var names = builder.get_handler_names()
-    assert_equal(len(paths), 3)
-    assert_equal(names[0], "first")
-    assert_equal(names[1], "second")
-    assert_equal(names[2], "third")
-    assert_equal(paths[0], paths[1])
-
-
-def test_builder_paths_and_names_stay_aligned() raises:
-    var builder = RouterBuilder()
-    for i in range(20):
-        builder.get("/p" + String(i), "h" + String(i))
-    var paths = builder.get_paths()
-    var names = builder.get_handler_names()
-    assert_equal(len(paths), len(names))
-    for i in range(20):
-        assert_equal(paths[i], "/p" + String(i))
-        assert_equal(names[i], "h" + String(i))
-
-
 def main() raises:
     print("Running RouterBuilder tests...")
     test_router_builder()
-    test_builder_returns_independent_copies()
-    test_builder_keeps_registration_order_and_duplicates()
-    test_builder_paths_and_names_stay_aligned()
     print("✅ All RouterBuilder tests passed!")

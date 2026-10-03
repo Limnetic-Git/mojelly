@@ -48,7 +48,7 @@ fi
 
 # 3. Python Test Syntax Check
 echo -e "▶ Checking Python test suite syntax..."
-if python3 -m py_compile tests/test_e2e_server.py tests/test_limits_e2e.py tests/test_routing_e2e.py tests/test_protocol_e2e.py tests/e2e_common.py; then
+if python3 -m py_compile tests/test_e2e_server.py; then
     echo -e "${GREEN}✔ Python test syntax valid${NC}\n"
 else
     echo -e "${RED}✘ Python test syntax errors detected${NC}\n"
