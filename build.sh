@@ -3,8 +3,8 @@
 set -e
 
 USE_PIXI=true
-MOJO_VERSION="1.0.0"
-
+MOJO_VERSION="1.1.0"
+SHOW_WARNINGS=false
 
 run_mojo() {
     if [ "$USE_PIXI" = true ]; then
@@ -45,7 +45,7 @@ channels = [
 platforms = ["linux-64"]
 
 [dependencies]
-mojo = "==1.0.0"
+mojo = "==1.1.0"
 emberjson = ">=0.3.0"
 
 [tasks]
@@ -113,9 +113,6 @@ if [ "$NEED_REBUILD" = true ]; then
         -fPIC \
         2>/dev/null || echo "⚠️ bridge_ssl.c not found or failed to compile"
 
-    # Start from an empty archive: ar rcs only adds/replaces members, so a
-    # stale object (e.g. from another bridge) would otherwise stay linked in.
-    rm -f ../lib/libmojelly.a
     ar rcs ../lib/libmojelly.a bridge.o bridge_ssl.o 2>/dev/null || ar rcs ../lib/libmojelly.a bridge.o
     rm -f bridge.o bridge_ssl.o 2>/dev/null
     cd ..
@@ -151,7 +148,11 @@ LINK_FLAGS="-Xlinker -L./lib \
     -Xlinker -lpthread \
     -Xlinker -ldl"
 
-run_mojo build -I. build/app_generated.mojo -O3 -o server $LINK_FLAGS
+if [ "$SHOW_WARNINGS" = true ]; then
+    run_mojo build -I. -I examples build/app_generated.mojo -O3 -o server $LINK_FLAGS
+else
+    run_mojo build --disable-warnings -I. -I examples build/app_generated.mojo -O3 -o server $LINK_FLAGS
+fi
 
 echo ""
 echo "✅ Server built! Run ./server"

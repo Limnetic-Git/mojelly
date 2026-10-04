@@ -139,7 +139,7 @@ emberjson
 (*Idk why, "jelly" sounds cool and I associate with grapes*)
 
 # How to use it
-Here is syntax of UPDATE-7 (0.0.7-INDEV), which will **100%** change in **1.0.0**,
+Here is syntax of UPDATE-11 (0.0.11-INDEV), which will **100%** change in **1.0.0**,
 so check it out, but don't learn it hardly :)
 
 **⚠️ WARNING: FRAMEWORK (as like as Mojo) WORKS ONLY ON LINUX! USE WSL OR LINUX DISTRO**
@@ -152,34 +152,141 @@ from mojelly.core.router_handlers import RouterHandlers
 from dto import UserDTO
 from test_html_page import test_html_page, test_css
 
-#Hello world plain text response
+
+# Hello world plain text response
 def hello_world(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "Hello, World")
 
-#JSON response
+
+# JSON response
 def json_test(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, '{"nickname":"Limnetic","age":17}')
     resp.set_json()
     return resp^
 
-#HTML page response
+
+# HTML page response
 def html_page_test(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, test_html_page)
     resp.set_html()
     return resp^
 
-#CSS response
+
+# CSS response
 def css_test(req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, test_css)
     resp.set_css()
     return resp^
 
-#With DTO validation
+
+# With DTO validation
 def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
     if dto.age >= 18:
         return HTTPResponse(200, dto.nickname + "is adult")
     else:
         return HTTPResponse(200, dto.nickname + "is not adult")
+
+
+# With DTO validation from Query String (FastAPI style)
+def get_user_dto_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+    if dto.age >= 18:
+        return HTTPResponse(200, dto.nickname + " is adult (GET)")
+    else:
+        return HTTPResponse(200, dto.nickname + " is minor (GET)")
+
+
+# Echo request header and set response header
+def headers_test(req: HTTPRequest) -> HTTPResponse:
+    var incoming = req.get_header("X-Test-Request")
+    var resp = HTTPResponse(200, "Header received: " + incoming)
+    resp.set_header("X-Test-Response", "MojellyOK")
+    return resp^
+
+
+# Echo query string
+def query_test(req: HTTPRequest) -> HTTPResponse:
+    return HTTPResponse(
+        200, "Path: " + req.path + ", Query: " + req.query_string
+    )
+
+
+# Read query dictionary
+def query_dict_test(req: HTTPRequest) -> HTTPResponse:
+    var name = req.get_query("name", "Guest")
+    var page = req.get_query("page", "1")
+    return HTTPResponse(200, "Hello " + name + ", page " + page)
+
+
+# Set cookie
+def cookie_set_handler(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, "Cookies set!\nGo to /cookies/read")
+    resp.set_cookie(
+        "session",
+        "abc123xyz",
+        max_age=3600,
+        http_only=True,
+        same_site="Lax",
+    )
+    resp.set_cookie(
+        "theme",
+        "dark",
+        max_age=86400,
+        http_only=False,
+        same_site="Lax",
+    )
+    return resp^
+
+
+# Get cookie
+def cookie_read_handler(req: HTTPRequest) -> HTTPResponse:
+    var session = req.get_cookie("session")
+    var theme = req.get_cookie("theme")
+
+    var body = String()
+    body += "Cookie values:\n"
+    body += "  session = "
+    if session == "":
+        body += "(not set)"
+    else:
+        body += session
+    body += "\n  theme = "
+    if theme == "":
+        body += "(not set)"
+    else:
+        body += theme
+
+    var resp = HTTPResponse(200, body)
+    return resp^
+
+
+# Delete cookie
+def cookie_delete_handler(req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, "Cookies deleted!")
+    resp.delete_cookie("session")
+    resp.delete_cookie("theme")
+    return resp^
+
+
+# Some path-params handlers:
+def profile_handler(req: HTTPRequest) -> HTTPResponse:
+    var login = req.get_param("login")
+    var resp = HTTPResponse(200, "Profile of " + login)
+    return resp^
+
+
+def post_handler(req: HTTPRequest) -> HTTPResponse:
+    var user_id = req.get_param("id")
+    var post_id = req.get_param("post_id")
+    var resp = HTTPResponse(200, "Post " + post_id + " by user " + user_id)
+    return resp^
+
+
+def move_page_handler(req: HTTPRequest) -> HTTPResponse:
+    var page_id = req.get_param("page_id")
+    var move_to = req.get_param("move_to")
+    var resp = HTTPResponse(200, "Move page " + page_id + " to " + move_to)
+    return resp^
+
 
 def main():
     var router = RouterHandlers()
@@ -188,7 +295,20 @@ def main():
     router.get("/json", json_test)
     router.get("/html", html_page_test)
     router.get("/style.css", css_test)
+    router.get("/headers", headers_test)
+    router.get("/query", query_test)
+    router.get("/query/dict", query_dict_test)
     router.post("/user", dto_validation_test)
+    router.get("/user/query", get_user_dto_test)
+
+    router.get("/cookies/set", cookie_set_handler)
+    router.get("/cookies/read", cookie_read_handler)
+    router.get("/cookies/delete", cookie_delete_handler)
+
+    router.get("/user/:id", user_handler)
+    router.get("/user/:login/profile", profile_handler)
+    router.get("/user/:id/posts/:post_id", post_handler)
+    router.post("/move-page/:page_id/:move_to", move_page_handler)
 
     var server = HTTPServer(router)
     server.listen(8080)
