@@ -802,7 +802,8 @@ def generate_server(user_file: String) -> Optional[String]:
                     handler,
                     (
                         "! This likely won't have an impact, but it is better"
-                        " to use an explicit import for the DTO instead of `*`. (NEVERMIND, THIS WARNING IS BROKEN)"
+                        " to use an explicit import for the DTO instead of `*`."
+                        " (NEVERMIND, THIS WARNING IS BROKEN)"
                     ),
                 )
 
