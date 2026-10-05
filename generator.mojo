@@ -710,7 +710,7 @@ def generate_dto_wrappers_code(
             '    var payload = req.query.to_json() if req.method == "GET"'
             " else req.body\n"
         )
-        code += "    var dto_opt = try_deserialize[" + dto_type + "](payload)\n"
+        code += "    var dto_opt = try_from_json[" + dto_type + "](payload)\n"
         code += "    if not dto_opt:\n"
         code += (
             '        var err_msg = "Invalid query parameters" if req.method =='
@@ -802,7 +802,8 @@ def generate_server(user_file: String) -> Optional[String]:
                     handler,
                     (
                         "! This likely won't have an impact, but it is better"
-                        " to use an explicit import for the DTO instead of `*`"
+                        " to use an explicit import for the DTO instead of `*`."
+                        " (NEVERMIND, THIS WARNING IS BROKEN)"
                     ),
                 )
 
@@ -813,7 +814,7 @@ def generate_server(user_file: String) -> Optional[String]:
     var routes_code = generate_routes_code(routes, handler_dtos)
     var json_import = String()
     if dto_wrappers_code != "":
-        json_import = "from emberjson import try_deserialize"
+        json_import = "from emberjson import try_from_json"
     var main_code_by_mode = Dict[Bool, String]()
 
     main_code_by_mode[
@@ -1021,7 +1022,7 @@ def mojo_handler(
     var router_response = router[].handle(request)
 
     var resp_body_len = router_response.body.byte_length()
-    var http_response = String(capacity=resp_body_len + 256)
+    var http_response = String(capacity_bytes=resp_body_len + 256)
     http_response += "HTTP/1.1 "
     http_response += String(router_response.status)
     http_response += " " + get_status_phrase(router_response.status) + "\\r\\n"
