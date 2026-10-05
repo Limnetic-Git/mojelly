@@ -97,8 +97,7 @@ from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
 
-
-# Your first handler with Mojelly
+# Your first handler in Mojelly🍇
 def hello_world(req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "Hello, World")
 
