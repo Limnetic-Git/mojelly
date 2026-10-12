@@ -705,7 +705,7 @@ def generate_dto_wrappers_code(
             continue
 
         var wrapper = generated_dto_wrapper_name(handler)
-        code += "def " + wrapper + "(req: HTTPRequest) -> HTTPResponse:\n"
+        code += "def " + wrapper + "(mut req: HTTPRequest) -> HTTPResponse:\n"
         code += (
             '    var payload = req.query.to_json() if req.method == "GET"'
             " else req.body\n"
@@ -870,7 +870,7 @@ ROUTES_PLACEHOLDER
 # For cool guys only 😎
 # ============================================================
 
-from mojelly.http.request import HTTPRequest, parse_header_block, parse_cookie_header
+from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse, get_status_phrase
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
@@ -1012,12 +1012,8 @@ def mojo_handler(
 
     var request = HTTPRequest(url=url, method=method)
     request.body = body
-
-    parse_header_block(headers_str, request.headers)
-
-    var cookie_header = request.get_header("Cookie")
-    if cookie_header != "":
-        parse_cookie_header(cookie_header, request.cookies)
+    # Lazy: headers/cookies/query are parsed on first access inside handlers.
+    request._headers_raw = headers_str
 
     var router_response = router[].handle(request)
 

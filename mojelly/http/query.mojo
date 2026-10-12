@@ -17,36 +17,59 @@ def int_to_hex_char(val: Int) -> String:
 
 def url_decode(s: String) -> String:
     var bytes = s.as_bytes()
+    var n = len(bytes)
+
+    var has_escape = False
+    for i in range(n):
+        var b = bytes[i]
+        if b == 37 or b == 43:  # '%' or '+'
+            has_escape = True
+            break
+    if not has_escape:
+        return s.copy()
+
     var res = String()
     var i = 0
-    var n = len(bytes)
+    var chunk_start = 0
     while i < n:
         var b = bytes[i]
         if b == 43:  # '+' -> ' '
+            if chunk_start < i:
+                res += String(
+                    StringSlice(unsafe_from_utf8=bytes[chunk_start:i])
+                )
             res += " "
             i += 1
-        elif b == 37 and i + 2 < n:  # '%'
-            var h1 = hex_char_to_int(bytes[i + 1])
-            var h2 = hex_char_to_int(bytes[i + 2])
-            if h1 != -1 and h2 != -1:
-                res += chr(h1 * 16 + h2)
-                i += 3
-            else:
-                res += chr(Int(b))
-                i += 1
-        else:
-            res += chr(Int(b))
+            chunk_start = i
+        elif b == 37:  # '%'
+            if i + 2 < n:
+                var h1 = hex_char_to_int(bytes[i + 1])
+                var h2 = hex_char_to_int(bytes[i + 2])
+                if h1 != -1 and h2 != -1:
+                    if chunk_start < i:
+                        res += String(
+                            StringSlice(unsafe_from_utf8=bytes[chunk_start:i])
+                        )
+                    res += chr(h1 * 16 + h2)
+                    i += 3
+                    chunk_start = i
+                    continue
             i += 1
-    return res
+        else:
+            i += 1
+
+    if chunk_start < n:
+        res += String(StringSlice(unsafe_from_utf8=bytes[chunk_start:n]))
+    return res^
 
 
 def url_encode(s: String) -> String:
     var bytes = s.as_bytes()
-    var res = String()
-    for i in range(len(bytes)):
+    var n = len(bytes)
+    var all_unreserved = True
+    for i in range(n):
         var b = bytes[i]
-        # unreserved: A-Z, a-z, 0-9, '-', '_', '.', '~'
-        if (
+        var ok = (
             (b >= 65 and b <= 90)
             or (b >= 97 and b <= 122)
             or (b >= 48 and b <= 57)
@@ -54,13 +77,41 @@ def url_encode(s: String) -> String:
             or b == 95
             or b == 46
             or b == 126
-        ):
-            res += chr(Int(b))
-        else:
-            var high = Int(b) // 16
-            var low = Int(b) % 16
-            res += "%" + int_to_hex_char(high) + int_to_hex_char(low)
-    return res
+        )
+        if not ok:
+            all_unreserved = False
+            break
+    if all_unreserved:
+        return s.copy()
+
+    var res = String()
+    var i = 0
+    var chunk_start = 0
+    while i < n:
+        var b = bytes[i]
+        var ok = (
+            (b >= 65 and b <= 90)
+            or (b >= 97 and b <= 122)
+            or (b >= 48 and b <= 57)
+            or b == 45
+            or b == 95
+            or b == 46
+            or b == 126
+        )
+        if ok:
+            i += 1
+            continue
+        if chunk_start < i:
+            res += String(StringSlice(unsafe_from_utf8=bytes[chunk_start:i]))
+        var high = Int(b) // 16
+        var low = Int(b) % 16
+        res += "%" + int_to_hex_char(high) + int_to_hex_char(low)
+        i += 1
+        chunk_start = i
+
+    if chunk_start < n:
+        res += String(StringSlice(unsafe_from_utf8=bytes[chunk_start:n]))
+    return res^
 
 
 def parse_int_safe(s: String, default: Int) -> Int:
@@ -114,6 +165,26 @@ def is_numeric(s: String) -> Bool:
     return True
 
 
+def _json_escape(s: String) -> String:
+    var res = String()
+    var bytes = s.as_bytes()
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if b == 34:  # '"'
+            res += '\\"'
+        elif b == 92:  # '\'
+            res += "\\\\"
+        elif b == 10:  # '\n'
+            res += "\\n"
+        elif b == 13:  # '\r'
+            res += "\\r"
+        elif b == 9:  # '\t'
+            res += "\\t"
+        else:
+            res += chr(Int(b))
+    return res^
+
+
 def query_to_json(params: Dict[String, String]) -> String:
     var res = String("{")
     var first = True
@@ -121,16 +192,16 @@ def query_to_json(params: Dict[String, String]) -> String:
         if not first:
             res += ","
         first = False
-        res += '"' + key + '":'
+        res += '"' + _json_escape(key) + '":'
         var val = params.get(key, "")
         if val == "true" or val == "false":
             res += val
         elif is_numeric(val):
             res += val
         else:
-            res += '"' + val + '"'
+            res += '"' + _json_escape(val) + '"'
     res += "}"
-    return res
+    return res^
 
 
 def parse_query_string(qs: String) -> Dict[String, String]:
@@ -138,22 +209,43 @@ def parse_query_string(qs: String) -> Dict[String, String]:
     if qs == "":
         return result^
 
-    for pair_span in qs.split("&"):
-        var pair = String(pair_span)
-        if pair == "":
+    var bytes = qs.as_bytes()
+    var n = len(bytes)
+    var i = 0
+    while i < n:
+        var pair_end = i
+        while pair_end < n and bytes[pair_end] != 38:  # '&'
+            pair_end += 1
+
+        if pair_end == i:
+            i = pair_end + 1
             continue
-        var eq_pos = pair.find("=")
-        if eq_pos != -1:
-            var key_raw = String(pair[byte=0:eq_pos])
-            var val_raw = String(pair[byte = eq_pos + 1 : len(pair.as_bytes())])
-            var key = url_decode(key_raw)
-            var val = url_decode(val_raw)
+        var eq = -1
+        var j = i
+        while j < pair_end:
+            if bytes[j] == 61:  # '='
+                eq = j
+                break
+            j += 1
+
+        if eq != -1:
+            var key_raw = String(StringSlice(unsafe_from_utf8=bytes[i:eq]))
+            var val_raw = String(
+                StringSlice(unsafe_from_utf8=bytes[eq + 1 : pair_end])
+            )
+            var key = url_decode(key_raw^)
             if key != "":
-                result[key] = val
+                result[key] = url_decode(val_raw^)
         else:
-            var key = url_decode(pair)
+            var key_raw = String(
+                StringSlice(unsafe_from_utf8=bytes[i:pair_end])
+            )
+            var key = url_decode(key_raw^)
             if key != "":
                 result[key] = ""
+
+        i = pair_end + 1  # skip '&'
+
     return result^
 
 
@@ -166,62 +258,89 @@ def serialize_query_string(params: Dict[String, String]) -> String:
         first = False
         var val = params.get(key, "")
         result += url_encode(key) + "=" + url_encode(val)
-    return result
+    return result^
 
 
-struct QueryParams(Copyable, Movable, Sized):
-    var data: Dict[String, String]
+struct QueryParams(Copyable, Movable):
+    var _raw: String
+    var _cache: Optional[Dict[String, String]]
 
     def __init__(out self):
-        self.data = Dict[String, String]()
+        self._raw = ""
+        self._cache = None
 
     def __init__(out self, data: Dict[String, String]):
-        self.data = data.copy()
+        self._raw = ""
+        self._cache = data.copy()
 
     def __init__(out self, qs: String):
-        self.data = parse_query_string(qs)
+        self._raw = qs.copy()
+        self._cache = None
 
     def __copyinit__(out self, existing: Self):
-        self.data = existing.data.copy()
+        self._raw = existing._raw.copy()
+        if existing._cache:
+            self._cache = existing._cache.value().copy()
+        else:
+            self._cache = None
 
     def __moveinit__(out self, deinit existing: Self):
-        self.data = existing.data^
+        self._raw = existing._raw^
+        self._cache = existing._cache^
 
-    def get(self, name: String, default: String = "") -> String:
-        return self.data.get(name, default)
+    # ---- Lazy ensure ----
 
-    def get_int(self, name: String, default: Int = 0) -> Int:
-        var val = self.data.get(name, "")
+    def _ensure(mut self):
+        if not self._cache:
+            self._cache = parse_query_string(self._raw)
+
+    # ---- Read access (mut self to trigger the lazy parse) ----
+
+    def get(mut self, name: String, default: String = "") -> String:
+        self._ensure()
+        return self._cache.value().get(name, default)
+
+    def get_int(mut self, name: String, default: Int = 0) -> Int:
+        self._ensure()
+        var val = self._cache.value().get(name, "")
         return parse_int_safe(val, default)
 
-    def get_bool(self, name: String, default: Bool = False) -> Bool:
-        var val = self.data.get(name, "")
-        if val == "":
-            if name in self.data:
-                return True
+    def get_bool(mut self, name: String, default: Bool = False) -> Bool:
+        self._ensure()
+        var d = self._cache.value()
+        if name not in d:
             return default
+        var val = d.get(name, "")
+        if val == "":
+            return True
         return parse_bool_safe(val, default)
 
-    def has(self, name: String) -> Bool:
-        return name in self.data
+    def has(mut self, name: String) -> Bool:
+        self._ensure()
+        return name in self._cache.value()
 
-    def __contains__(self, name: String) -> Bool:
-        return name in self.data
+    def __contains__(mut self, name: String) -> Bool:
+        self._ensure()
+        return name in self._cache.value()
 
-    def __getitem__(self, name: String) -> String:
-        return self.data.get(name, "")
+    def __getitem__(mut self, name: String) -> String:
+        self._ensure()
+        return self._cache.value().get(name, "")
 
-    def __len__(self) -> Int:
-        return len(self.data)
-
-    def to_dict(self) -> Dict[String, String]:
+    def to_dict(mut self) -> Dict[String, String]:
+        self._ensure()
         var copy = Dict[String, String]()
-        for k in self.data.keys():
-            copy[k] = self.data.get(k, "")
+        for k in self._cache.value().keys():
+            copy[k] = self._cache.value().get(k, "")
         return copy^
 
-    def to_string(self) -> String:
-        return serialize_query_string(self.data)
+    def to_string(mut self) -> String:
+        # If the cache was never built, hand back the raw string (already
+        # in canonical query-string form)
+        if not self._cache:
+            return self._raw.copy()
+        return serialize_query_string(self._cache.value())
 
-    def to_json(self) -> String:
-        return query_to_json(self.data)
+    def to_json(mut self) -> String:
+        self._ensure()
+        return query_to_json(self._cache.value())
