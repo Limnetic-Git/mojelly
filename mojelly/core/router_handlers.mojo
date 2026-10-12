@@ -2,8 +2,7 @@ from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
 
 
-comptime Handler = def(HTTPRequest) thin -> HTTPResponse
-
+comptime Handler = def(mut HTTPRequest) thin -> HTTPResponse
 comptime SLASH: UInt8 = 47  # '/'
 comptime COLON: UInt8 = 58  # ':'
 comptime STAR: UInt8 = 42  # '*'
