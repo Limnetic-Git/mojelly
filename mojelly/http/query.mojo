@@ -296,6 +296,10 @@ struct QueryParams(Copyable, Movable):
 
     # ---- Read access (mut self to trigger the lazy parse) ----
 
+    def size(mut self) -> Int:
+        self._ensure()
+        return len(self._cache.value())
+
     def get(mut self, name: String, default: String = "") -> String:
         self._ensure()
         return self._cache.value().get(name, default)
@@ -307,10 +311,9 @@ struct QueryParams(Copyable, Movable):
 
     def get_bool(mut self, name: String, default: Bool = False) -> Bool:
         self._ensure()
-        var d = self._cache.value()
-        if name not in d:
+        if name not in self._cache.value():
             return default
-        var val = d.get(name, "")
+        var val = self._cache.value().get(name, "")
         if val == "":
             return True
         return parse_bool_safe(val, default)

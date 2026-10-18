@@ -73,7 +73,7 @@ def test_wrapper_name_and_generation() raises:
 
     var wrapper_code = generate_dto_wrappers_code(routes, handler_dtos)
     assert_true(
-        "def __mojelly_dto_user_handler(req: HTTPRequest) -> HTTPResponse:"
+        "def __mojelly_dto_user_handler(mut req: HTTPRequest) -> HTTPResponse:"
         in wrapper_code
     )
     assert_true("try_from_json[UserDTO]" in wrapper_code)
