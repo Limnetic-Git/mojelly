@@ -18,7 +18,7 @@ def test_empty_query() raises:
     assert_equal(len(params), 0)
 
     var req = HTTPRequest(url="/items")
-    assert_equal(len(req.query), 0)
+    assert_equal(req.query.size(), 0)
     assert_false(req.has_query("page"))
     assert_equal(req.get_query("page"), "")
     assert_equal(req.get_query("page", default="1"), "1")
@@ -244,7 +244,7 @@ def test_parse_query_string_edge_cases() raises:
 
 def test_query_params_container() raises:
     var q = QueryParams("a=1&flag&name=Bob%20Ray")
-    assert_equal(len(q), 3)
+    assert_equal(q.size(), 3)
     assert_true("a" in q)
     assert_true(q.has("flag"))
     assert_true("zzz" not in q)
@@ -254,7 +254,7 @@ def test_query_params_container() raises:
     assert_equal(q.get_int("a"), 1)
 
     var copy = q.copy()
-    assert_equal(len(copy), 3)
+    assert_equal(copy.size(), 3)
     assert_equal(copy["name"], "Bob Ray")
 
     var from_dict = Dict[String, String]()
@@ -267,7 +267,7 @@ def test_query_params_container() raises:
 def test_query_params_roundtrip_through_string() raises:
     var q = QueryParams("name=Bob%20Ray&city=New%20York")
     var again = QueryParams(q.to_string())
-    assert_equal(len(again), 2)
+    assert_equal(again.size(), 2)
     assert_equal(again["name"], "Bob Ray")
     assert_equal(again["city"], q["city"])
 

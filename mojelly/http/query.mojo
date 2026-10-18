@@ -296,6 +296,10 @@ struct QueryParams(Copyable, Movable):
 
     # ---- Read access (mut self to trigger the lazy parse) ----
 
+    def size(mut self) -> Int:
+        self._ensure()
+        return len(self._cache.value())
+
     def get(mut self, name: String, default: String = "") -> String:
         self._ensure()
         return self._cache.value().get(name, default)
