@@ -93,6 +93,7 @@ struct HTTPRequest:
         method: String = "GET",
         path: String = "",
         query_string: String = "",
+        headers_raw: String = "",
     ):
         self.url = url
 
@@ -113,7 +114,7 @@ struct HTTPRequest:
         self.query = QueryParams(self.query_string^)
         self.method = method
         self.body = ""
-        self._headers_raw = ""
+        self._headers_raw = headers_raw
         self._headers_cache = None
         self._cookies_cache = None
         self.params = Dict[String, String]()
@@ -131,6 +132,14 @@ struct HTTPRequest:
                 return h.get(key, "")
         return ""
 
+    def set_header(mut self, name: String, value: String):
+        self._ensure_headers()
+        self._headers_cache.value()[name] = value
+
+    def get_headers(mut self) -> Dict[String, String]:
+        self._ensure_headers()
+        return self._headers_cache.value().copy()
+
     def _ensure_headers(mut self):
         if not self._headers_cache:
             var d = Dict[String, String]()
@@ -143,6 +152,14 @@ struct HTTPRequest:
         self._ensure_cookies()
         ref d = self._cookies_cache.value()
         return d.get(name, "")
+
+    def set_cookie(mut self, name: String, value: String):
+        self._ensure_cookies()
+        self._cookies_cache.value()[name] = value
+
+    def get_cookies(mut self) -> Dict[String, String]:
+        self._ensure_cookies()
+        return self._cookies_cache.value().copy()
 
     def has_cookie(mut self, name: String) -> Bool:
         self._ensure_cookies()

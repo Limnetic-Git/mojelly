@@ -871,7 +871,7 @@ ROUTES_PLACEHOLDER
 # ============================================================
 
 from mojelly.http.request import HTTPRequest
-from mojelly.http.response import HTTPResponse, get_status_phrase
+from mojelly.http.response import HTTPResponse, get_status_phrase, _has_crlf, _strip_crlf
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
 from std.memory import Pointer
@@ -1022,14 +1022,19 @@ def mojo_handler(
     http_response += "HTTP/1.1 "
     http_response += String(router_response.status)
     http_response += " " + get_status_phrase(router_response.status) + "\\r\\n"
-    http_response += "Content-Type: " + router_response.content_type + "\\r\\n"
+    var resp_content_type = _strip_crlf(router_response.content_type)
+    http_response += "Content-Type: " + resp_content_type + "\\r\\n"
     http_response += "Content-Length: " + String(resp_body_len) + "\\r\\n"
     http_response += "Connection: keep-alive\\r\\n"
 
     for header_key in router_response.headers.keys():
-        var val = router_response.headers.get(header_key, "")
+        if _has_crlf(header_key) or header_key.find(":") != -1:
+            continue
+        var val = _strip_crlf(router_response.headers.get(header_key, ""))
         http_response += header_key + ": " + val + "\\r\\n"
     for cookie in router_response.cookies:
+        if _has_crlf(cookie):
+            continue
         http_response += "Set-Cookie: " + cookie + "\\r\\n"
     http_response += "\\r\\n"
     http_response += router_response.body
