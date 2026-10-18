@@ -1,5 +1,10 @@
-from mojelly.http.response import HTTPResponse, get_status_phrase
-from std.testing import assert_equal, assert_true
+from mojelly.http.response import (
+    HTTPResponse,
+    get_status_phrase,
+    _has_crlf,
+    _strip_crlf,
+)
+from std.testing import assert_equal, assert_true, assert_false
 
 
 def test_default_response() raises:
@@ -138,6 +143,61 @@ def test_all_status_helpers_default_content_type() raises:
         assert_equal(HTTPResponse(codes[i], "x").content_type, "text/plain")
 
 
+def test_crlf_helpers() raises:
+    assert_true(_has_crlf("hello\rworld"))
+    assert_true(_has_crlf("hello\nworld"))
+    assert_true(_has_crlf("hello\r\nworld"))
+    assert_false(_has_crlf("hello world"))
+    assert_equal(_strip_crlf("clean string"), "clean string")
+    assert_equal(_strip_crlf("hello\r\nworld\r\n"), "helloworld")
+    assert_equal(_strip_crlf("\r\n\r\n"), "")
+
+
+def test_header_crlf_protection() raises:
+    var resp = HTTPResponse()
+    # Malformed names with CRLF, colon, or empty are rejected
+    resp.set_header("X-Bad\r\nHeader", "value")
+    assert_equal(len(resp.headers), 0)
+
+    resp.set_header("X-Bad\nHeader", "value")
+    assert_equal(len(resp.headers), 0)
+
+    resp.set_header("X-Colon:Header", "value")
+    assert_equal(len(resp.headers), 0)
+
+    resp.set_header("", "value")
+    assert_equal(len(resp.headers), 0)
+
+    # Values with CRLF are stripped of \r and \n
+    resp.set_header("X-Clean", "safe-value\r\nSet-Cookie: evil=1\r\n")
+    assert_equal(resp.headers.get("X-Clean", ""), "safe-valueSet-Cookie: evil=1")
+
+
+def test_cookie_crlf_protection() raises:
+    var resp = HTTPResponse()
+    # Malformed cookie names with CRLF, =, ;, or empty are rejected
+    resp.set_cookie("bad\r\nname", "val")
+    assert_equal(len(resp.cookies), 0)
+
+    resp.set_cookie("bad\nname", "val")
+    assert_equal(len(resp.cookies), 0)
+
+    resp.set_cookie("bad=name", "val")
+    assert_equal(len(resp.cookies), 0)
+
+    resp.set_cookie("bad;name", "val")
+    assert_equal(len(resp.cookies), 0)
+
+    resp.set_cookie("", "val")
+    assert_equal(len(resp.cookies), 0)
+
+    # Value, path, and same_site CRLF are stripped
+    resp.set_cookie("auth", "tok\r\nen", path="/app\r\n", same_site="Lax\r\n")
+    assert_equal(len(resp.cookies), 1)
+    assert_false(_has_crlf(resp.cookies[0]))
+    assert_equal(resp.cookies[0], "auth=token; Path=/app; HttpOnly; SameSite=Lax")
+
+
 def main() raises:
     print("Running HTTPResponse tests...")
     test_default_response()
@@ -153,4 +213,7 @@ def main() raises:
     test_set_header_overwrites_same_name()
     test_response_is_independent_per_instance()
     test_all_status_helpers_default_content_type()
+    test_crlf_helpers()
+    test_header_crlf_protection()
+    test_cookie_crlf_protection()
     print("✅ All HTTPResponse tests passed!")

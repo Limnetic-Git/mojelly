@@ -311,10 +311,9 @@ struct QueryParams(Copyable, Movable):
 
     def get_bool(mut self, name: String, default: Bool = False) -> Bool:
         self._ensure()
-        var d = self._cache.value()
-        if name not in d:
+        if name not in self._cache.value():
             return default
-        var val = d.get(name, "")
+        var val = self._cache.value().get(name, "")
         if val == "":
             return True
         return parse_bool_safe(val, default)
