@@ -262,7 +262,10 @@ def test_parse_cookie_header_edge_cases() raises:
 
 
 def test_lazy_headers_and_cookies_parsing() raises:
-    var raw = "Host: mojelly.local\r\nUser-Agent: test\r\nCookie: session=123; mode=dark\r\n"
+    var raw = (
+        "Host: mojelly.local\r\nUser-Agent: test\r\nCookie: session=123;"
+        " mode=dark\r\n"
+    )
     var req = HTTPRequest(url="/test", headers_raw=raw)
     assert_equal(req.get_header("Host"), "mojelly.local")
     assert_equal(req.get_header("user-agent"), "test")

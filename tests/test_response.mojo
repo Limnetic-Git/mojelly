@@ -170,7 +170,9 @@ def test_header_crlf_protection() raises:
 
     # Values with CRLF are stripped of \r and \n
     resp.set_header("X-Clean", "safe-value\r\nSet-Cookie: evil=1\r\n")
-    assert_equal(resp.headers.get("X-Clean", ""), "safe-valueSet-Cookie: evil=1")
+    assert_equal(
+        resp.headers.get("X-Clean", ""), "safe-valueSet-Cookie: evil=1"
+    )
 
 
 def test_cookie_crlf_protection() raises:
@@ -195,7 +197,9 @@ def test_cookie_crlf_protection() raises:
     resp.set_cookie("auth", "tok\r\nen", path="/app\r\n", same_site="Lax\r\n")
     assert_equal(len(resp.cookies), 1)
     assert_false(_has_crlf(resp.cookies[0]))
-    assert_equal(resp.cookies[0], "auth=token; Path=/app; HttpOnly; SameSite=Lax")
+    assert_equal(
+        resp.cookies[0], "auth=token; Path=/app; HttpOnly; SameSite=Lax"
+    )
 
 
 def main() raises:
