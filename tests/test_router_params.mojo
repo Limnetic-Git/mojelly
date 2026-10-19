@@ -8,33 +8,33 @@ from mojelly.http.response import HTTPResponse
 from std.testing import assert_equal, assert_false, assert_true
 
 
-def echo_id(req: HTTPRequest) -> HTTPResponse:
+def echo_id(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "id=" + req.get_param("id"))
 
 
-def echo_two(req: HTTPRequest) -> HTTPResponse:
+def echo_two(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(
         200, req.get_param("login") + "|" + req.get_param("post_id")
     )
 
 
-def echo_rest(req: HTTPRequest) -> HTTPResponse:
+def echo_rest(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "rest=" + req.get_param("path"))
 
 
-def echo_me(req: HTTPRequest) -> HTTPResponse:
+def echo_me(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "exact me")
 
 
-def echo_first(req: HTTPRequest) -> HTTPResponse:
+def echo_first(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "first:" + req.get_param("x"))
 
 
-def echo_second(req: HTTPRequest) -> HTTPResponse:
+def echo_second(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "second:" + req.get_param("y"))
 
 
-def echo_query_and_param(req: HTTPRequest) -> HTTPResponse:
+def echo_query_and_param(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(
         200, req.get_param("id") + "/" + req.get_query("page", "none")
     )
@@ -63,11 +63,10 @@ def test_split_segments() raises:
 
 
 def test_compile_pattern() raises:
-    var no_handler = echo_id
     # a static path is not a pattern: it belongs to the exact-match table
-    assert_false(Bool(compile_pattern("/static/path", no_handler, "GET")))
+    assert_false(Bool(compile_pattern("/static/path", echo_id, "GET")))
 
-    var param = compile_pattern("/user/:id", no_handler, "GET")
+    var param = compile_pattern("/user/:id", echo_id, "GET")
     assert_true(Bool(param))
     ref p = param.value()
     assert_equal(p.num_segments, 2)
@@ -78,7 +77,7 @@ def test_compile_pattern() raises:
     assert_equal(p.segments[1].name, "id")
     assert_equal(p.method, "GET")
 
-    var wild = compile_pattern("/files/*path", no_handler, "POST")
+    var wild = compile_pattern("/files/*path", echo_id, "POST")
     assert_true(Bool(wild))
     assert_true(wild.value().has_wildcard)
     assert_true(wild.value().segments[1].is_wildcard)

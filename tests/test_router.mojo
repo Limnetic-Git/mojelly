@@ -4,27 +4,27 @@ from mojelly.core.router_handlers import RouterHandlers
 from std.testing import assert_equal
 
 
-def handle_get_root(req: HTTPRequest) -> HTTPResponse:
+def handle_get_root(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "root")
 
 
-def handle_get_items(req: HTTPRequest) -> HTTPResponse:
+def handle_get_items(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "items: " + req.query_string)
 
 
-def handle_post_items(req: HTTPRequest) -> HTTPResponse:
+def handle_post_items(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(201, "created item: " + req.body)
 
 
-def handle_put_item(req: HTTPRequest) -> HTTPResponse:
+def handle_put_item(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "updated")
 
 
-def handle_delete_item(req: HTTPRequest) -> HTTPResponse:
+def handle_delete_item(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(204, "")
 
 
-def handle_patch_item(req: HTTPRequest) -> HTTPResponse:
+def handle_patch_item(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "patched")
 
 
