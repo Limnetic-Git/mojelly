@@ -7,26 +7,26 @@ from test_handlers import dto_validation_test, user_handler
 
 
 # Hello world plain text response
-def hello_world(req: HTTPRequest) -> HTTPResponse:
+def hello_world(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "Hello, World")
 
 
 # JSON response
-def json_test(req: HTTPRequest) -> HTTPResponse:
+def json_test(mut req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, '{"nickname":"Limnetic","age":17}')
     resp.set_json()
     return resp^
 
 
 # HTML page response
-def html_page_test(req: HTTPRequest) -> HTTPResponse:
+def html_page_test(mut req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, test_html_page)
     resp.set_html()
     return resp^
 
 
 # CSS response
-def css_test(req: HTTPRequest) -> HTTPResponse:
+def css_test(mut req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, test_css)
     resp.set_css()
     return resp^
@@ -41,7 +41,7 @@ def css_test(req: HTTPRequest) -> HTTPResponse:
 
 
 # With DTO validation from Query String (FastAPI style)
-def get_user_dto_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+def get_user_dto_test(mut req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
     if dto.age >= 18:
         return HTTPResponse(200, dto.nickname + " is adult (GET)")
     else:
@@ -49,7 +49,7 @@ def get_user_dto_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
 
 
 # Echo request header and set response header
-def headers_test(req: HTTPRequest) -> HTTPResponse:
+def headers_test(mut req: HTTPRequest) -> HTTPResponse:
     var incoming = req.get_header("X-Test-Request")
     var resp = HTTPResponse(200, "Header received: " + incoming)
     resp.set_header("X-Test-Response", "MojellyOK")
@@ -57,21 +57,21 @@ def headers_test(req: HTTPRequest) -> HTTPResponse:
 
 
 # Echo query string
-def query_test(req: HTTPRequest) -> HTTPResponse:
+def query_test(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(
         200, "Path: " + req.path + ", Query: " + req.query_string
     )
 
 
 # Read query dictionary
-def query_dict_test(req: HTTPRequest) -> HTTPResponse:
+def query_dict_test(mut req: HTTPRequest) -> HTTPResponse:
     var name = req.get_query("name", "Guest")
     var page = req.get_query("page", "1")
     return HTTPResponse(200, "Hello " + name + ", page " + page)
 
 
 # Set cookie
-def cookie_set_handler(req: HTTPRequest) -> HTTPResponse:
+def cookie_set_handler(mut req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, "Cookies set!\nGo to /cookies/read")
     resp.set_cookie(
         "session",
@@ -91,7 +91,7 @@ def cookie_set_handler(req: HTTPRequest) -> HTTPResponse:
 
 
 # Get cookie
-def cookie_read_handler(req: HTTPRequest) -> HTTPResponse:
+def cookie_read_handler(mut req: HTTPRequest) -> HTTPResponse:
     var session = req.get_cookie("session")
     var theme = req.get_cookie("theme")
 
@@ -113,7 +113,7 @@ def cookie_read_handler(req: HTTPRequest) -> HTTPResponse:
 
 
 # Delete cookie
-def cookie_delete_handler(req: HTTPRequest) -> HTTPResponse:
+def cookie_delete_handler(mut req: HTTPRequest) -> HTTPResponse:
     var resp = HTTPResponse(200, "Cookies deleted!")
     resp.delete_cookie("session")
     resp.delete_cookie("theme")
@@ -121,20 +121,20 @@ def cookie_delete_handler(req: HTTPRequest) -> HTTPResponse:
 
 
 # Some path-params handlers:
-def profile_handler(req: HTTPRequest) -> HTTPResponse:
+def profile_handler(mut req: HTTPRequest) -> HTTPResponse:
     var login = req.get_param("login")
     var resp = HTTPResponse(200, "Profile of " + login)
     return resp^
 
 
-def post_handler(req: HTTPRequest) -> HTTPResponse:
+def post_handler(mut req: HTTPRequest) -> HTTPResponse:
     var user_id = req.get_param("id")
     var post_id = req.get_param("post_id")
     var resp = HTTPResponse(200, "Post " + post_id + " by user " + user_id)
     return resp^
 
 
-def move_page_handler(req: HTTPRequest) -> HTTPResponse:
+def move_page_handler(mut req: HTTPRequest) -> HTTPResponse:
     var page_id = req.get_param("page_id")
     var move_to = req.get_param("move_to")
     var resp = HTTPResponse(200, "Move page " + page_id + " to " + move_to)
@@ -142,7 +142,7 @@ def move_page_handler(req: HTTPRequest) -> HTTPResponse:
 
 
 # Body with an embedded NUL byte (must reach the client intact)
-def nul_body_test(req: HTTPRequest) -> HTTPResponse:
+def nul_body_test(mut req: HTTPRequest) -> HTTPResponse:
     var body = String("A")
     body += chr(0)
     body += "B"
@@ -150,7 +150,7 @@ def nul_body_test(req: HTTPRequest) -> HTTPResponse:
 
 
 # Echo the request body with its length (a NUL byte inside must survive)
-def echo_test(req: HTTPRequest) -> HTTPResponse:
+def echo_test(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, String(req.body.byte_length()) + ":" + req.body)
 
 

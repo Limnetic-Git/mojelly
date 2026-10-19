@@ -47,8 +47,8 @@ def test_request_explicit_path_and_query() raises:
 def test_request_headers_and_body() raises:
     var req = HTTPRequest(url="/submit", method="POST")
     req.body = "hello world"
-    req.headers["Content-Type"] = "text/plain"
-    req.headers["Authorization"] = "Bearer 12345"
+    req.set_header("Content-Type", "text/plain")
+    req.set_header("Authorization", "Bearer 12345")
 
     assert_equal(req.body, "hello world")
     assert_equal(req.get_header("Content-Type"), "text/plain")
@@ -95,8 +95,8 @@ def _assert_same(a: Dict[String, String], b: Dict[String, String]) raises:
 
 def test_get_header_is_case_insensitive() raises:
     var req = HTTPRequest(url="/", method="GET")
-    req.headers["content-type"] = "text/plain"
-    req.headers["X-Mixed-Case"] = "v"
+    req.set_header("content-type", "text/plain")
+    req.set_header("X-Mixed-Case", "v")
     assert_equal(req.get_header("Content-Type"), "text/plain")
     assert_equal(req.get_header("CONTENT-TYPE"), "text/plain")
     assert_equal(req.get_header("content-type"), "text/plain")
@@ -171,7 +171,7 @@ def test_parsers_match_previous_implementation() raises:
 
 def test_cookie_accessors() raises:
     var req = HTTPRequest(url="/", method="GET")
-    req.cookies["session"] = "abc"
+    req.set_cookie("session", "abc")
     assert_equal(req.get_cookie("session"), "abc")
     assert_equal(req.get_cookie("missing"), "")
     assert_true(req.has_cookie("session"))
@@ -209,7 +209,7 @@ def test_query_accessors() raises:
 def test_request_without_query_has_empty_query() raises:
     var req = HTTPRequest(url="/plain")
     assert_equal(req.query_string, "")
-    assert_equal(len(req.query), 0)
+    assert_equal(req.query.size(), 0)
     assert_true(not req.has_query("anything"))
 
 
@@ -217,7 +217,7 @@ def test_question_mark_without_query() raises:
     var req = HTTPRequest(url="/x?")
     assert_equal(req.path, "/x")
     assert_equal(req.query_string, "")
-    assert_equal(len(req.query), 0)
+    assert_equal(req.query.size(), 0)
 
 
 def test_query_keeps_only_first_question_mark_as_separator() raises:
@@ -229,8 +229,8 @@ def test_query_keeps_only_first_question_mark_as_separator() raises:
 
 def test_get_header_prefers_exact_then_any_case() raises:
     var req = HTTPRequest()
-    req.headers["Accept"] = "exact"
-    req.headers["accept"] = "lower"
+    req.set_header("Accept", "exact")
+    req.set_header("accept", "lower")
     assert_equal(req.get_header("Accept"), "exact")
     assert_equal(req.get_header("accept"), "lower")
     # no exact match for "ACCEPT": any-case fallback returns one of the two
@@ -261,6 +261,18 @@ def test_parse_cookie_header_edge_cases() raises:
     assert_equal(d["a"], "2")  # later duplicate wins
 
 
+def test_lazy_headers_and_cookies_parsing() raises:
+    var raw = (
+        "Host: mojelly.local\r\nUser-Agent: test\r\nCookie: session=123;"
+        " mode=dark\r\n"
+    )
+    var req = HTTPRequest(url="/test", headers_raw=raw)
+    assert_equal(req.get_header("Host"), "mojelly.local")
+    assert_equal(req.get_header("user-agent"), "test")
+    assert_equal(req.get_cookie("session"), "123")
+    assert_equal(req.get_cookie("mode"), "dark")
+
+
 def main() raises:
     print("Running HTTPRequest tests...")
     test_default_request()
@@ -276,6 +288,7 @@ def main() raises:
     test_question_mark_without_query()
     test_query_keeps_only_first_question_mark_as_separator()
     test_get_header_prefers_exact_then_any_case()
+    test_lazy_headers_and_cookies_parsing()
     test_parse_header_block_trims_spaces_and_tabs()
     test_parse_cookie_header_edge_cases()
     test_parse_header_block()
