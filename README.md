@@ -13,7 +13,7 @@ Thank you, Chris :)
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/Mojo-1.0.0-blue.svg" alt="Mojo"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Mojo-1.1.0-blue.svg" alt="Mojo"></a>
   <a href="#"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"></a>
   <a href="#"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs"></a>
   <a href="#"><img src="https://img.shields.io/badge/Platform-Linux-lightgrey.svg" alt="Platform"></a>
@@ -25,62 +25,6 @@ Mojelly started as Limnetic's (creator, me :D) pet-project which was created for
 And Mojo is young lang, very powerful with simple syntax. 
 So, it was cool challenge for me. Mojelly is created to be fast-enough, 
 simple to use and easy to contribute, that makes it good choice to you to join the project!
-
-
-## Some benchmarks 📊
-
-### JSON response in UPDATE-7 (0.0.7-INDEV) using 4 threads (default): 
-```bash
-❯ wrk -t4 -c100 -d5s http://localhost:8080/json
-Running 5s test @ http://localhost:8080/json
-  4 threads and 100 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   175.81us  110.82us   2.51ms   92.64%
-    Req/Sec   143.30k    12.24k  176.02k    66.00%
-  2848343 requests in 5.01s, 344.98MB read
-Requests/sec: 568252.06
-Transfer/sec:     68.82MB
-```
-
-### Text response in UPDATE-7 (0.0.7-INDEV) using 4 threads (default):
-```bash
-❯ wrk -t4 -c100 -d5s http://localhost:8080/
-Running 5s test @ http://localhost:8080/
-  4 threads and 100 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   172.56us   98.25us   2.74ms   90.90%
-    Req/Sec   144.09k    10.54k  196.64k    70.50%
-  2866244 requests in 5.01s, 276.08MB read
-Requests/sec: 572494.94
-Transfer/sec:     55.14MB
-```
-
-### HTML-page response in UPDATE-7 (0.0.7-INDEV) using 4 threads (default):
-```bash
-❯ wrk -t4 -c100 -d5s http://localhost:8080/html
-Running 5s test @ http://localhost:8080/html
-  4 threads and 100 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   213.75us   77.08us   4.41ms   89.62%
-    Req/Sec   116.12k     5.97k  137.13k    72.00%
-  2308867 requests in 5.01s, 1.67GB read
-Requests/sec: 460630.12
-Transfer/sec:    340.89MB
-```
-
-### DTO validation response in UPDATE-7 (0.0.7-INDEV) using 4 threads (default):
-```bash
-❯ wrk -t4 -c100 -d5s -s post.lua http://localhost:8080/user
-Running 5s test @ http://localhost:8080/user
-  4 threads and 100 connections
-  Thread Stats   Avg      Stdev     Max   +/- Stdev
-    Latency   194.81us   66.64us   2.07ms   87.49%
-    Req/Sec   126.52k     6.53k  152.52k    71.00%
-  2517629 requests in 5.01s, 242.50MB read
-Requests/sec: 502680.09
-Transfer/sec:     48.42MB
-```
-And i will try to make **MORE RPS** cause I love **BLAZING** 🔥
 
 ## Logging 📝
 
