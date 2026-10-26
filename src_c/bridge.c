@@ -8,6 +8,7 @@
 #include <netinet/tcp.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,26 +25,21 @@
 static int g_log_level = 0;
 
 #define LOG_COLORS 1
-// 0 - u are boring, but little bit faster
-// 1 - u are cool =)
 
 #define READ_BUFFER_SIZE 16384
 #define LISTEN_BACKLOG 1024
 #define HTTP_STATUS_DIGITS 3
-#define HTTP_VERSION_PREFIX_LEN 9        /* strlen("HTTP/1.1 ") */
-#define BODY_PRERESERVE_MAX (64ULL << 10) /* reserve at most 64 KiB up front;
-                                             larger bodies grow as data arrives */
+#define HTTP_VERSION_PREFIX_LEN 9
+#define BODY_PRERESERVE_MAX (64ULL << 10)
 
-/* Limits, overridable at startup (0 disables the timeouts):
- *   MOJELLY_MAX_HEADER_SIZE   url + headers of one request, bytes (default 64 KiB)
- *   MOJELLY_MAX_BODY          request body, bytes             (default 10 MiB)
- *   MOJELLY_IDLE_TIMEOUT      seconds without any traffic     (default 60)
- *   MOJELLY_REQUEST_TIMEOUT   seconds to receive one request  (default 30)
- */
 static size_t g_max_header_size = 64UL << 10;
 static size_t g_max_body_size = 10UL << 20;
 static long g_idle_timeout_ms = 60 * 1000;
 static long g_request_timeout_ms = 30 * 1000;
+static long g_shutdown_timeout_ms = 30 * 1000;
+
+/* Graceful shutdown state. */
+static volatile sig_atomic_t g_shutdown = 0;
 
 #if LOG_COLORS
 #define COLOR_RESET "\033[0m"
@@ -70,12 +66,6 @@ static _Thread_local unsigned long request_count = 0;
 
 /* ---------- Mojo response ownership ---------- */
 
-/*
- * MOJO_RESP_OWNED    - mojo_handler malloc'ed the buffer, server free()s it.
- * MOJO_RESP_BORROWED - buffer is owned by the Mojo side and stays valid
- *                      until the next request on this connection is
- *                      fully processed. Server must NOT free() it.
- */
 #define MOJO_RESP_OWNED 0
 #define MOJO_RESP_BORROWED 1
 
@@ -147,7 +137,7 @@ typedef enum {
     HEADER_STATE_VALUE
 } header_state_t;
 
-/* ---------- static llhttp settings (shared, read-only) ---------- */
+/* ---------- static llhttp settings ---------- */
 
 static llhttp_settings_t g_settings;
 static pthread_once_t g_settings_once = PTHREAD_ONCE_INIT;
@@ -172,6 +162,8 @@ static void mojelly_init_settings(void) {
         g_idle_timeout_ms = atol(v) * 1000;
     if ((v = getenv("MOJELLY_REQUEST_TIMEOUT")) && atol(v) >= 0)
         g_request_timeout_ms = atol(v) * 1000;
+    if ((v = getenv("MOJELLY_SHUTDOWN_TIMEOUT")) && atol(v) > 0)
+        g_shutdown_timeout_ms = atol(v) * 1000;
     llhttp_settings_init(&g_settings);
     g_settings.on_message_begin = on_message_begin_c;
     g_settings.on_url = on_url_c;
@@ -194,15 +186,14 @@ typedef struct client_ctx {
     buffer_t url;
     buffer_t headers;
     buffer_t body;
-    buffer_t pending; /* accumulates data while processing is busy */
+    buffer_t pending;
     header_state_t header_state;
     int keep_alive;
-    int processing; /* 1 while a response write is in flight */
+    int processing;
     void* router;
-    int reject_status; /* 413 / 431 set by a parser callback that refused */
-    /* Timeouts: bookkeeping for the per-thread sweep timer. */
+    int reject_status;
     uint64_t last_active_ms;
-    uint64_t request_started_ms; /* 0 = no request in progress */
+    uint64_t request_started_ms;
     int linked;
     struct client_ctx* prev;
     struct client_ctx* next;
@@ -211,10 +202,10 @@ typedef struct client_ctx {
 typedef struct {
     uv_write_t req;
     uv_tcp_t* client;
-    char* data; /* owned or borrowed */
+    char* data;
     size_t len;
     int keep_alive;
-    int free_data; /* 1 -> free(data) in finish_write */
+    int free_data;
 } write_req_t;
 
 typedef struct {
@@ -223,25 +214,31 @@ typedef struct {
     int thread_id;
 } thread_args_t;
 
+typedef struct {
+    uv_timer_t timer;
+    int64_t deadline;
+    int stopped;   /* guard: uv_stop called at most once */
+} shutdown_ctx_t;
+
 static const char* http_500 =
-    "HTTP/1.1 500 Internal Server Error\r\n"
-    "Content-Length: 0\r\n"
-    "Connection: close\r\n\r\n";
+"HTTP/1.1 500 Internal Server Error\r\n"
+"Content-Length: 0\r\n"
+"Connection: close\r\n\r\n";
 
 static const char* http_413 =
-    "HTTP/1.1 413 Payload Too Large\r\n"
-    "Content-Length: 0\r\n"
-    "Connection: close\r\n\r\n";
+"HTTP/1.1 413 Payload Too Large\r\n"
+"Content-Length: 0\r\n"
+"Connection: close\r\n\r\n";
 
 static const char* http_431 =
-    "HTTP/1.1 431 Request Header Fields Too Large\r\n"
-    "Content-Length: 0\r\n"
-    "Connection: close\r\n\r\n";
+"HTTP/1.1 431 Request Header Fields Too Large\r\n"
+"Content-Length: 0\r\n"
+"Connection: close\r\n\r\n";
 
 static const char* http_400 =
-    "HTTP/1.1 400 Bad Request\r\n"
-    "Content-Length: 0\r\n"
-    "Connection: close\r\n\r\n";
+"HTTP/1.1 400 Bad Request\r\n"
+"Content-Length: 0\r\n"
+"Connection: close\r\n\r\n";
 
 static const char* get_method_color(const char* method) {
     if (strcmp(method, "GET") == 0) return COLOR_CYAN;
@@ -265,7 +262,6 @@ static void log_request(const char* method, const char* url, int status,
     const char* method_color = get_method_color(method);
     const char* status_color = get_status_color(status);
 
-    /* Format the time at most once per second per thread. */
     static _Thread_local time_t cached_at = 0;
     static _Thread_local char time_str[20] = "00:00:00";
     time_t now = time(NULL);
@@ -279,12 +275,10 @@ static void log_request(const char* method, const char* url, int status,
     printf("[%s] [T%d] %s%s%s %s%s%s %s%d%s %.2fms\n", time_str,
            current_thread_id, method_color, method, COLOR_RESET, COLOR_BOLD,
            url, COLOR_RESET, status_color, status, COLOR_RESET, duration_ms);
-}
-
+                        }
 
 /* ---------- close / write ---------- */
 
-/* Connections of the current thread (one libuv loop per thread). */
 static _Thread_local client_ctx_t* conn_list = NULL;
 
 static void conn_link(client_ctx_t* ctx) {
@@ -317,10 +311,8 @@ static void on_close_c(uv_handle_t* handle) {
 
 static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
 static void send_response(uv_tcp_t* client, const char* response, size_t len,
-                          int keep_alive, int owned);
+                            int keep_alive, int owned);
 
-/* Answer a parser failure: 431 / 413 if a callback refused the request for
- * size reasons, 400 otherwise. The connection is closed after the reply. */
 static void send_parse_error(client_ctx_t* ctx) {
     const char* resp = http_400;
     if (ctx->reject_status == 431) resp = http_431;
@@ -328,9 +320,6 @@ static void send_parse_error(client_ctx_t* ctx) {
     send_response(&ctx->client, resp, strlen(resp), 0, MOJO_RESP_BORROWED);
 }
 
-/* Free-list of write requests, per thread: avoids a malloc/free pair per
- * response. Several writes can be in flight on one connection (pipelining),
- * so these are not embedded in the connection context. */
 #define WRITE_REQ_POOL_MAX 256
 static _Thread_local write_req_t* wr_pool = NULL;
 static _Thread_local int wr_pool_len = 0;
@@ -387,7 +376,6 @@ static void finish_write(write_req_t* wr, int status) {
         ctx->parser.data = ctx;
         ctx->processing = 0;
 
-        /* If data arrived while we were busy, feed it to the parser now. */
         if (ctx->pending.len > 0) {
             size_t plen = ctx->pending.len;
             const char* pdata = ctx->pending.data;
@@ -406,15 +394,8 @@ static void on_write_c(uv_write_t* req, int status) {
 
 /* ---------- response ---------- */
 
-/*
- * Sends a response.
- * If `owned` == MOJO_RESP_OWNED, the server free()s `response` after write.
- * If `owned` == MOJO_RESP_BORROWED, the server does NOT touch the memory;
- * the caller guarantees the buffer stays valid until the next request on
- * this connection is fully processed (i.e. until finish_write runs).
- */
 static void send_response(uv_tcp_t* client, const char* response, size_t len,
-                          int keep_alive, int owned) {
+                            int keep_alive, int owned) {
     if (client == NULL || uv_is_closing((uv_handle_t*)client)) {
         if (owned == MOJO_RESP_OWNED && response != NULL) free((void*)response);
         return;
@@ -423,7 +404,7 @@ static void send_response(uv_tcp_t* client, const char* response, size_t len,
     if (response == NULL) {
         response = http_500;
         len = strlen(http_500);
-        owned = MOJO_RESP_BORROWED; /* static literal: must not be freed */
+        owned = MOJO_RESP_BORROWED;
         keep_alive = 0;
     }
 
@@ -451,12 +432,10 @@ static void send_response(uv_tcp_t* client, const char* response, size_t len,
             uv_close((uv_handle_t*)client, on_close_c);
         }
     }
-}
+                            }
 
 static int extract_status_from_response(const char* response) {
     if (response == NULL) return 500;
-    /* strncmp is safe for short responses (stops at '\0'). memcmp would
-     * read past the end if response is shorter than HTTP_VERSION_PREFIX_LEN. */
     if (strncmp(response, "HTTP/1.1 ", HTTP_VERSION_PREFIX_LEN) != 0)
         return 200;
     int status = 0;
@@ -481,7 +460,6 @@ static int on_message_begin_c(llhttp_t* parser) {
     return 0;
 }
 
-/* Refuse the request (431) once url + headers exceed the configured limit. */
 static int check_header_limit(client_ctx_t* ctx, size_t extra) {
     if (ctx->url.len + ctx->headers.len + extra > g_max_header_size) {
         ctx->reject_status = 431;
@@ -524,15 +502,11 @@ static int on_headers_complete_c(llhttp_t* parser) {
     ctx->header_state = HEADER_STATE_NONE;
     ctx->keep_alive = llhttp_should_keep_alive(parser);
 
-    /* Refuse oversized bodies up front (413), without reading them. */
     uint64_t cl = parser->content_length;
     if (cl != ULLONG_MAX && cl > g_max_body_size) {
         ctx->reject_status = 413;
         return -1;
     }
-    /* Pre-reserve a bounded amount so a bogus Content-Length cannot make us
-     * allocate its full size before any body byte arrives; the buffer grows
-     * geometrically as data comes in. */
     if (cl != ULLONG_MAX && cl > 0) {
         size_t want = cl < BODY_PRERESERVE_MAX ? (size_t)cl : BODY_PRERESERVE_MAX;
         if (buf_reserve(&ctx->body, want + 1) != 0) return -1;
@@ -542,7 +516,7 @@ static int on_headers_complete_c(llhttp_t* parser) {
 
 static int on_body_c(llhttp_t* parser, const char* at, size_t length) {
     client_ctx_t* ctx = (client_ctx_t*)parser->data;
-    if (ctx->body.len + length > g_max_body_size) { /* chunked bodies */
+    if (ctx->body.len + length > g_max_body_size) {
         ctx->reject_status = 413;
         return -1;
     }
@@ -555,14 +529,13 @@ static int on_message_complete_c(llhttp_t* parser) {
 
     if (router == NULL) {
         send_response(&ctx->client, http_500, strlen(http_500), 0,
-                      MOJO_RESP_BORROWED);
+                    MOJO_RESP_BORROWED);
         return 0;
     }
 
     request_count++;
-    ctx->request_started_ms = 0; /* request fully received */
+    ctx->request_started_ms = 0;
 
-    /* Block re-entering the parser until the response write completes. */
     ctx->processing = 1;
 
     const char* method = llhttp_method_name((llhttp_method_t)parser->method);
@@ -577,14 +550,14 @@ static int on_message_complete_c(llhttp_t* parser) {
     size_t resp_len = 0;
     int resp_owned = MOJO_RESP_OWNED;
     char* response = mojo_handler(router, url, method, headers, body, &resp_len,
-                                  &resp_owned, ctx->url.len, ctx->headers.len,
-                                  ctx->body.len);
+                                &resp_owned, ctx->url.len, ctx->headers.len,
+                                ctx->body.len);
 
     double duration_ms = 0;
     if (log_on) {
         clock_gettime(CLOCK_MONOTONIC, &end);
         duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
-                      (end.tv_nsec - start.tv_nsec) / 1000000.0;
+        (end.tv_nsec - start.tv_nsec) / 1000000.0;
     }
 
     int status = 500;
@@ -596,7 +569,7 @@ static int on_message_complete_c(llhttp_t* parser) {
         send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
     } else {
         send_response(&ctx->client, http_500, strlen(http_500), 0,
-                      MOJO_RESP_BORROWED);
+                    MOJO_RESP_BORROWED);
     }
 
     if (log_on) log_request(method, url, status, duration_ms);
@@ -606,16 +579,13 @@ static int on_message_complete_c(llhttp_t* parser) {
 /* ---------- connection ---------- */
 
 static void alloc_buffer_c(uv_handle_t* handle, size_t suggested_size,
-                           uv_buf_t* buf) {
+                            uv_buf_t* buf) {
     (void)handle;
     (void)suggested_size;
-    /* One buffer per thread (= per loop): the parser consumes it inside
-     * on_read_c and anything unparsed is copied into ctx->pending, so it
-     * can be reused for the next read. */
     static _Thread_local char read_buf[READ_BUFFER_SIZE];
     buf->base = read_buf;
     buf->len = READ_BUFFER_SIZE;
-}
+                            }
 
 static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
     if (nread > 0) {
@@ -627,22 +597,19 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
                 ctx->request_started_ms = now;
             }
             if (ctx->processing) {
-                /* Parser is busy - accumulate for later, but never more than
-                 * one maximal request. OOM or over the cap -> reply and close. */
                 if (ctx->pending.len + (size_t)nread >
                     g_max_header_size + g_max_body_size) {
                     ctx->reject_status = 413;
-                    send_parse_error(ctx);
-                } else if (buf_append(&ctx->pending, buf->base,
-                                      (size_t)nread) != 0) {
-                    send_response((uv_tcp_t*)client, http_500, strlen(http_500),
-                                  0, MOJO_RESP_BORROWED);
-                }
+                send_parse_error(ctx);
+                    } else if (buf_append(&ctx->pending, buf->base,
+                        (size_t)nread) != 0) {
+                        send_response((uv_tcp_t*)client, http_500, strlen(http_500),
+                                    0, MOJO_RESP_BORROWED);
+                        }
             } else {
                 enum llhttp_errno err =
-                    llhttp_execute(&ctx->parser, buf->base, (size_t)nread);
+                llhttp_execute(&ctx->parser, buf->base, (size_t)nread);
                 if (err != HPE_OK) {
-                    /* keep_alive = 0 -> connection will be closed. */
                     send_parse_error(ctx);
                 }
             }
@@ -654,23 +621,59 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
     }
 }
 
-/* Per-thread sweep: closes connections that were idle for too long or are
- * taking too long to deliver a complete request (slowloris). Runs once a
- * second; the granularity of the timeouts is therefore ~1 s. */
 static void sweep_timeouts_c(uv_timer_t* timer) {
     uint64_t now = uv_now(timer->loop);
     client_ctx_t* c = conn_list;
     while (c != NULL) {
-        client_ctx_t* next = c->next; /* uv_close does not unlink, but be safe */
+        client_ctx_t* next = c->next;
         if (!uv_is_closing((uv_handle_t*)&c->client)) {
             int idle = g_idle_timeout_ms > 0 &&
-                       now - c->last_active_ms > (uint64_t)g_idle_timeout_ms;
+            now - c->last_active_ms > (uint64_t)g_idle_timeout_ms;
             int slow = g_request_timeout_ms > 0 && c->request_started_ms != 0 &&
-                       now - c->request_started_ms >
-                           (uint64_t)g_request_timeout_ms;
+            now - c->request_started_ms >
+            (uint64_t)g_request_timeout_ms;
             if (idle || slow) uv_close((uv_handle_t*)&c->client, on_close_c);
         }
         c = next;
+    }
+}
+
+/* ---------- graceful shutdown ---------- */
+
+static void on_signal(uv_signal_t* handle, int signum) {
+    (void)handle;
+    (void)signum;
+    if (g_shutdown) return;
+    g_shutdown = 1;
+    fprintf(stderr,
+            "[C] Received signal %d, starting graceful shutdown...\n", signum);
+}
+
+static void check_shutdown_c(uv_timer_t* timer) {
+    shutdown_ctx_t* sctx = (shutdown_ctx_t*)timer->data;
+    if (!g_shutdown || sctx->stopped) return;
+
+    if (conn_list == NULL) {
+        sctx->stopped = 1;
+        fprintf(stderr, "[C] All connections drained, stopping loop\n");
+        uv_stop(timer->loop);
+        return;
+    }
+
+    int64_t now = uv_now(timer->loop);
+    if (now >= sctx->deadline) {
+        sctx->stopped = 1;
+        fprintf(stderr,
+                "[C] Shutdown timeout reached, force-closing connections\n");
+        client_ctx_t* c = conn_list;
+        while (c != NULL) {
+            client_ctx_t* next = c->next;
+            if (!uv_is_closing((uv_handle_t*)&c->client)) {
+                uv_close((uv_handle_t*)&c->client, on_close_c);
+            }
+            c = next;
+        }
+        uv_stop(timer->loop);
     }
 }
 
@@ -678,6 +681,7 @@ static void on_connection_c(uv_stream_t* server, int status) {
     ensure_settings_init();
 
     if (status < 0) return;
+    if (g_shutdown) return;
 
     client_ctx_t* ctx = (client_ctx_t*)malloc(sizeof(client_ctx_t));
     if (!ctx) return;
@@ -706,7 +710,6 @@ static void on_connection_c(uv_stream_t* server, int status) {
     }
     conn_link(ctx);
 
-    /* TCP_NODELAY must be set AFTER accept */
     int fd = -1;
     if (uv_fileno((uv_handle_t*)&ctx->client, &fd) == 0 && fd >= 0) {
         int nodelay = 1;
@@ -716,7 +719,7 @@ static void on_connection_c(uv_stream_t* server, int status) {
     if (uv_read_start((uv_stream_t*)&ctx->client, alloc_buffer_c, on_read_c) !=
         0) {
         uv_close((uv_handle_t*)&ctx->client, on_close_c);
-    }
+        }
 }
 
 /* ---------- server socket ---------- */
@@ -727,9 +730,9 @@ static int create_bound_socket(int port) {
 
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-#ifdef SO_REUSEPORT
+    #ifdef SO_REUSEPORT
     setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-#endif
+    #endif
 
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
@@ -744,14 +747,11 @@ static int create_bound_socket(int port) {
         return -1;
     }
 
-    /* NOTE: no listen() here - uv_listen will do it */
     return fd;
 }
 
 /* ---------- thread ---------- */
 
-/* CPUs this process may run on (honours taskset / cgroup cpusets). Workers
- * pin themselves to these, never to CPUs outside the allowed set. */
 static int allowed_cpus[CPU_SETSIZE];
 static int num_allowed_cpus = 0;
 
@@ -767,13 +767,23 @@ static void detect_allowed_cpus(void) {
     if (num_allowed_cpus == 0) allowed_cpus[num_allowed_cpus++] = 0;
 }
 
-/* requested > 0 wins; otherwise MOJELLY_THREADS, otherwise one worker per
- * allowed CPU. */
 static int resolve_thread_count(int requested) {
     if (requested > 0) return requested;
     const char* env = getenv("MOJELLY_THREADS");
     if (env != NULL && atoi(env) > 0) return atoi(env);
     return num_allowed_cpus;
+}
+
+/* Kept for wait_for_shutdown(). */
+static pthread_t g_worker_threads[256];
+static int g_worker_count = 0;
+static pthread_mutex_t g_worker_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void close_if_open(uv_handle_t* h, void* arg) {
+    (void)arg;
+    if (!uv_is_closing(h)) {
+        uv_close(h, NULL);
+    }
 }
 
 static void* thread_main(void* arg) {
@@ -822,7 +832,6 @@ static void* thread_main(void* arg) {
     int rc = uv_tcp_open(server, server_fd);
     if (rc != 0) {
         fprintf(stderr, "[C] ❌ uv_tcp_open failed: %s\n", uv_strerror(rc));
-        /* fd still ours - close manually. Handle was init'ed, close it too. */
         close(server_fd);
         uv_close((uv_handle_t*)server, NULL);
         uv_run(loop, UV_RUN_NOWAIT);
@@ -832,8 +841,6 @@ static void* thread_main(void* arg) {
         free(args);
         return NULL;
     }
-
-    /* From here on libuv owns server_fd - never close() it manually. */
 
     rc = uv_listen((uv_stream_t*)server, LISTEN_BACKLOG, on_connection_c);
     if (rc != 0) {
@@ -856,19 +863,57 @@ static void* thread_main(void* arg) {
         }
     }
 
+    uv_signal_t* sigint_h = (uv_signal_t*)malloc(sizeof(uv_signal_t));
+    uv_signal_t* sigterm_h = (uv_signal_t*)malloc(sizeof(uv_signal_t));
+    if (sigint_h != NULL) {
+        uv_signal_init(loop, sigint_h);
+        uv_signal_start(sigint_h, on_signal, SIGINT);
+        uv_unref((uv_handle_t*)sigint_h);
+    }
+    if (sigterm_h != NULL) {
+        uv_signal_init(loop, sigterm_h);
+        uv_signal_start(sigterm_h, on_signal, SIGTERM);
+        uv_unref((uv_handle_t*)sigterm_h);
+    }
+
+    shutdown_ctx_t* sctx = (shutdown_ctx_t*)malloc(sizeof(shutdown_ctx_t));
+    if (sctx != NULL) {
+        uv_timer_init(loop, &sctx->timer);
+        sctx->timer.data = sctx;
+        sctx->stopped = 0;
+        sctx->deadline = uv_now(loop) + g_shutdown_timeout_ms;
+        uv_timer_start(&sctx->timer, check_shutdown_c, 100, 100);
+    }
+
     printf("[C] 🧵 Thread %d listening on CPU %d (port %d)\n", args->thread_id,
-           cpu_id, args->port);
+        cpu_id, args->port);
     fflush(stdout);
 
     uv_run(loop, UV_RUN_DEFAULT);
 
-    /* graceful shutdown */
-    uv_walk(loop, (uv_walk_cb)uv_close, NULL);
+    /* ---- Cleanup after graceful shutdown ---- */
+
+    /* Stop timers first, so they do not fire during the closing walk. */
+    if (sweep != NULL) {
+        uv_timer_stop(sweep);
+    }
+    if (sctx != NULL) {
+        uv_timer_stop(&sctx->timer);
+    }
+
+    /* Close every handle that is still open, exactly once. */
+    uv_walk(loop, close_if_open, NULL);
+
+    /* Drain close callbacks. */
     uv_run(loop, UV_RUN_DEFAULT);
     uv_loop_close(loop);
-    free(loop);
+
+    free(sctx);
+    free(sigint_h);
+    free(sigterm_h);
     free(sweep);
     free(server);
+    free(loop);
     free(args);
 
     return NULL;
@@ -881,7 +926,11 @@ void pthread_create_wrapper(int port, void* router, int num_threads) {
     detect_allowed_cpus();
     num_threads = resolve_thread_count(num_threads);
 
-    for (int i = 0; i < num_threads; i++) {
+    pthread_mutex_lock(&g_worker_mutex);
+    g_worker_count = 0;
+    pthread_mutex_unlock(&g_worker_mutex);
+
+    for (int i = 0; i < num_threads && i < 256; i++) {
         pthread_t thread;
         thread_args_t* args = (thread_args_t*)malloc(sizeof(thread_args_t));
         if (!args) continue;
@@ -894,15 +943,29 @@ void pthread_create_wrapper(int port, void* router, int num_threads) {
             free(args);
             continue;
         }
-        pthread_detach(thread);
+        pthread_mutex_lock(&g_worker_mutex);
+        g_worker_threads[g_worker_count++] = thread;
+        pthread_mutex_unlock(&g_worker_mutex);
     }
     printf("[C] ✅ All %d threads created\n", num_threads);
     fflush(stdout);
 }
 
+void wait_for_shutdown(void) {
+    pthread_mutex_lock(&g_worker_mutex);
+    int n = g_worker_count;
+    pthread_t copy[256];
+    for (int i = 0; i < n; i++) copy[i] = g_worker_threads[i];
+    pthread_mutex_unlock(&g_worker_mutex);
+
+    for (int i = 0; i < n; i++) {
+        pthread_join(copy[i], NULL);
+    }
+}
+
 void mojelly_ensure_init(void) { ensure_settings_init(); }
 
-/* ---------- low-level wrappers (single-loop usage) ---------- */
+/* ---------- low-level wrappers ---------- */
 
 void uv_tcp_init_wrapper(uv_loop_t* loop, uv_tcp_t* tcp) {
     ensure_settings_init();
@@ -911,14 +974,12 @@ void uv_tcp_init_wrapper(uv_loop_t* loop, uv_tcp_t* tcp) {
 
 void uv_tcp_bind_wrapper(uv_tcp_t* tcp, const char* ip, int port) {
     ensure_settings_init();
-
     struct sockaddr_in addr;
     uv_ip4_addr(ip, port, &addr);
-
     unsigned int flags = 0;
-#ifdef UV_TCP_REUSEPORT
+    #ifdef UV_TCP_REUSEPORT
     flags |= UV_TCP_REUSEPORT;
-#endif
+    #endif
     int rc = uv_tcp_bind(tcp, (const struct sockaddr*)&addr, flags);
     if (rc != 0) {
         fprintf(stderr, "[C] ❌ uv_tcp_bind failed: %s\n", uv_strerror(rc));
@@ -969,7 +1030,7 @@ void uv_write_wrapper(uv_tcp_t* client, const char* data, size_t len) {
     wr->len = len;
     wr->client = client;
     wr->keep_alive = 0;
-    wr->free_data = 1; /* we malloc'ed it */
+    wr->free_data = 1;
 
     uv_buf_t buf = uv_buf_init(wr->data, (unsigned int)len);
     int rc = uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_c);
@@ -998,7 +1059,7 @@ uv_loop_t* uv_loop_create_wrapper(void) {
 
 void uv_loop_destroy_wrapper(uv_loop_t* loop) {
     if (!loop) return;
-    uv_walk(loop, (uv_walk_cb)uv_close, NULL);
+    uv_walk(loop, close_if_open, NULL);
     uv_run(loop, UV_RUN_DEFAULT);
     uv_loop_close(loop);
     free(loop);
