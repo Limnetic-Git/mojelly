@@ -7,6 +7,7 @@ comptime SLASH: UInt8 = 47  # '/'
 comptime COLON: UInt8 = 58  # ':'
 comptime STAR: UInt8 = 42  # '*'
 
+
 struct Segment:
     var is_param: Bool
     var is_wildcard: Bool
@@ -170,7 +171,6 @@ struct RouterHandlers:
         self.exact = Dict[String, Dict[String, Handler]]()
         self.patterns = List[CompiledPattern]()
         self.upload_routes = Dict[String, Bool]()
-
 
     def _insert_exact(
         mut self, method: String, path: String, handler: Handler

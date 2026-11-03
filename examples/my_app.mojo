@@ -5,11 +5,13 @@ from dto import UserDTO
 from test_html_page import test_html_page, test_css
 from test_handlers import dto_validation_test, user_handler
 
+
 # Multipart upload test handler.
 # At this stage (C-side streaming), the file is already on disk in /tmp.
 # Mojo doesn't yet know about FilePart, so we just report that streaming works.
 def upload_handler(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "Multipart received (streaming to /tmp)")
+
 
 # Hello world plain text response
 def hello_world(mut req: HTTPRequest) -> HTTPResponse:

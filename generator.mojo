@@ -367,7 +367,7 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
         for pattern in patterns.keys():
             if pattern in trimmed:
                 method = patterns.get(pattern, "")
-                is_upload = (pattern == "router.post_upload(")
+                is_upload = pattern == "router.post_upload("
                 var start = trimmed.find(pattern) + len(pattern.as_bytes())
                 var end = trimmed.rfind(")")
                 if start != -1 and end != -1 and start < end:
@@ -755,9 +755,13 @@ def generate_routes_code(
 
             if is_upload:
                 code += (
-                    '    mojelly_register_upload_route('
-                    + 'string_to_c_string("' + method + '"), '
-                    + 'string_to_c_string("' + path + '"))\n'
+                    "    mojelly_register_upload_route("
+                    + 'string_to_c_string("'
+                    + method
+                    + '"), '
+                    + 'string_to_c_string("'
+                    + path
+                    + '"))\n'
                 )
                 code += (
                     '    router_ptr[].post_upload("'
