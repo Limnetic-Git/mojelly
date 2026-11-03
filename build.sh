@@ -97,6 +97,7 @@ if [ "$NEED_REBUILD" = true ]; then
 
     cd src_c
 
+    # Compile main bridge
     gcc -c bridge.c -o bridge.o \
         -I/usr/include \
         -I/usr/include/llhttp \
@@ -105,6 +106,18 @@ if [ "$NEED_REBUILD" = true ]; then
         -fPIC -pthread \
         -O3 -march=native -mtune=native -pipe \
         -funroll-loops -ffast-math
+    echo "✅ bridge.o built"
+
+    if [ -f "multipart_parser.c" ]; then
+        gcc -c multipart_parser.c -o multipart_parser.o \
+            -I/usr/include \
+            -fPIC -pthread \
+            -O3 -march=native -mtune=native -pipe \
+            -funroll-loops -ffast-math
+        echo "✅ multipart_parser.o built"
+    else
+        echo "⚠️ multipart_parser.c not found, streaming multipart disabled"
+    fi
 
     gcc -c bridge_ssl.c -O3 -o bridge_ssl.o \
         -I/usr/include \
@@ -113,8 +126,15 @@ if [ "$NEED_REBUILD" = true ]; then
         -fPIC \
         2>/dev/null || echo "⚠️ bridge_ssl.c not found or failed to compile"
 
-    ar rcs ../lib/libmojelly.a bridge.o bridge_ssl.o 2>/dev/null || ar rcs ../lib/libmojelly.a bridge.o
-    rm -f bridge.o bridge_ssl.o 2>/dev/null
+    OBJ_FILES="bridge.o"
+    if [ -f "multipart_parser.o" ]; then
+        OBJ_FILES="$OBJ_FILES multipart_parser.o"
+    fi
+    if [ -f "bridge_ssl.o" ]; then
+        OBJ_FILES="$OBJ_FILES bridge_ssl.o"
+    fi
+    ar rcs ../lib/libmojelly.a $OBJ_FILES
+    rm -f bridge.o multipart_parser.o bridge_ssl.o 2>/dev/null
     cd ..
 
     echo "✅ libmojelly.a rebuilt!"
