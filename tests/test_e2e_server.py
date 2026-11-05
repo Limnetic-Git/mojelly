@@ -28,6 +28,25 @@ def wait_for_server(url, timeout=5.0):
     return False
 
 
+def _port_is_bindable():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind((SERVER_HOST, SERVER_PORT))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _wait_port_free(timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _port_is_bindable():
+            return
+        time.sleep(0.05)
+
 def run_tests():
     # 1. Build server if not built
     if not os.path.exists("./server"):
@@ -40,6 +59,7 @@ def run_tests():
     print("🚀 Starting Mojelly server for integration tests...")
     server_proc = subprocess.Popen(
         ["./server"],
+        env={**os.environ, "MOJELLY_MAX_BODY": "10485760"},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         preexec_fn=os.setsid,
@@ -354,11 +374,19 @@ def run_tests():
 
     finally:
         print("\n🛑 Stopping server...")
-        try:
-            os.killpg(os.getpgid(server_proc.pid), signal.SIGTERM)
-            server_proc.wait(timeout=2.0)
-        except Exception:
-            pass
+        if server_proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(server_proc.pid), signal.SIGTERM)
+                server_proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(server_proc.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                server_proc.wait()
+            except Exception:
+                pass
+        _wait_port_free()
 
     print(f"\n==========================================")
     print(f"Results: {passed} passed, {failed} failed")

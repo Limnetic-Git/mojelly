@@ -9,7 +9,9 @@ from e2e_common import Reader, Suite, connect, get, request
 
 
 def main():
-    with Suite("HTTP protocol behaviour") as s:
+    with Suite("HTTP protocol behaviour", env={
+        "MOJELLY_MAX_BODY": "10485760",
+    }) as s:
         # ---- response framing -------------------------------------------
         r = get("/")
         s.check("status line is HTTP/1.1 200 OK", r.status == 200 and r.reason == "OK", (r.status, r.reason))

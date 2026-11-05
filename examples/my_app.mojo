@@ -6,6 +6,13 @@ from test_html_page import test_html_page, test_css
 from test_handlers import dto_validation_test, user_handler
 
 
+# Multipart upload test handler.
+# At this stage (C-side streaming), the file is already on disk in /tmp.
+# Mojo doesn't yet know about FilePart, so we just report that streaming works.
+def upload_handler(mut req: HTTPRequest) -> HTTPResponse:
+    return HTTPResponse(200, "Multipart received (streaming to /tmp)")
+
+
 # Hello world plain text response
 def hello_world(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "Hello, World")
@@ -178,6 +185,7 @@ def main():
     router.get("/user/:id/posts/:post_id", post_handler)
     router.post("/move-page/:page_id/:move_to", move_page_handler)
 
+    router.post_upload("/upload", upload_handler)
     var server = HTTPServer(router)
     server.listen(8080)
     server.run()

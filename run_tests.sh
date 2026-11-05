@@ -38,6 +38,11 @@ run_unit_test() {
     fi
 }
 
+_kill_server() {
+    pkill -f './server' 2>/dev/null || true
+    sleep 0.3
+}
+
 # 1. Mojo Unit Tests
 echo -e "${BLUE}--- 1. Mojo Unit Tests ---${NC}"
 run_unit_test "tests/test_request.mojo" "HTTPRequest Suite"
@@ -50,6 +55,7 @@ run_unit_test "tests/test_generator_helpers.mojo" "Generator Helpers Suite"
 
 # 2. Python E2E Integration Suite
 echo -e "${BLUE}--- 2. End-to-End Server Integration Suite ---${NC}"
+_kill_server
 if python3 tests/test_e2e_server.py; then
     echo -e "${GREEN}✔ E2E Integration Suite passed${NC}\n"
 else
@@ -59,6 +65,7 @@ fi
 
 # 3a. Routing & Cookies (starts its own server)
 echo -e "${BLUE}--- Routing & Cookies Integration Suite ---${NC}"
+_kill_server
 if python3 tests/test_routing_e2e.py; then
     echo -e "${GREEN}✔ Routing & Cookies Suite passed${NC}\n"
 else
@@ -68,6 +75,7 @@ fi
 
 # 4b. HTTP Protocol (starts its own server)
 echo -e "${BLUE}--- HTTP Protocol Integration Suite ---${NC}"
+_kill_server
 if python3 tests/test_protocol_e2e.py; then
     echo -e "${GREEN}✔ HTTP Protocol Suite passed${NC}\n"
 else
@@ -77,6 +85,7 @@ fi
 
 # 3. Limits / timeouts / malformed requests (starts its own server)
 echo -e "${BLUE}--- 3. Limits & Timeouts Integration Suite ---${NC}"
+_kill_server
 if python3 tests/test_limits_e2e.py; then
     echo -e "${GREEN}✔ Limits & Timeouts Suite passed${NC}\n"
 else
