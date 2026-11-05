@@ -3,18 +3,14 @@
 
 #include <stdint.h>
 
-/* Application message kinds use the corresponding WebSocket data opcodes */
 enum {
     WS_TEXT = 1,
     WS_BINARY = 2
 };
 
-/* Every callback executes synchronously on the creating event-loop thread
- * The context and all payload pointers are borrowed and must not be freed here
- * A payload pointer may be NULL when its length is zero
- * Copy any message or reason that must survive beyond the callback
- * Any callback may be NULL and exceptions must never cross the C ABI boundary
- * An error notification does not necessarily imply that the connection has closed */
+/* 
+
+*/
 typedef struct {
     void (*on_open)(void* context, uint64_t connection_id, uint64_t route_id);
     void (*on_message)(void* context, uint64_t connection_id,
