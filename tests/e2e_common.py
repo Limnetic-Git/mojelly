@@ -100,12 +100,46 @@ def get(path, headers=None, method="GET", body=b""):
     return request(("\r\n".join(lines) + "\r\n\r\n").encode() + body)
 
 
+def _port_is_bindable():
+    """True if we can bind to (HOST, PORT) with SO_REUSEADDR.
+
+    SO_REUSEADDR lets bind() succeed while old connections linger in
+    TIME_WAIT, which is exactly the state we want to detect: the port is
+    free for a new server, even if the kernel still tracks old sockets.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind((HOST, PORT))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def _assert_port_free():
+    if not _port_is_bindable():
+        print(f"❌ port {PORT} is already in use (another ./server still running?)")
+        print(f"   run: pkill -f ./server")
+        sys.exit(1)
+
+
+def _wait_port_free(timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _port_is_bindable():
+            return
+        time.sleep(0.05)
+
+
 class Suite:
     """Starts ./server with an optional env, collects check() results."""
 
     def __init__(self, title, env=None):
         self.title = title
-        self.env = {**os.environ, **(env or {})}
+        base = {k: v for k, v in os.environ.items() if not k.startswith("MOJELLY_")}
+        self.env = {**base, **(env or {})}
         self.passed = 0
         self.failed = 0
         self.proc = None
@@ -122,14 +156,23 @@ class Suite:
         if not os.path.exists("./server"):
             print("❌ ./server not built")
             sys.exit(1)
+
+        _assert_port_free()
+
         self.proc = subprocess.Popen(
             ["./server"],
             env=self.env,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             preexec_fn=os.setsid,
         )
         for _ in range(50):
+            if self.proc.poll() is not None:
+                err = self.proc.stderr.read().decode(errors="replace") if self.proc.stderr else ""
+                print("❌ server exited immediately")
+                if err:
+                    print(err)
+                sys.exit(1)
             try:
                 if get("/").status == 200:
                     break
@@ -143,11 +186,19 @@ class Suite:
         return self
 
     def __exit__(self, *exc):
-        try:
-            os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
-            self.proc.wait(timeout=2.0)
-        except Exception:
-            pass
+        if self.proc is not None and self.proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGTERM)
+                self.proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(self.proc.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                self.proc.wait()
+            except Exception:
+                pass
+        _wait_port_free()
         return False
 
     def finish(self):
