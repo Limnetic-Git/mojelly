@@ -71,11 +71,7 @@ static long g_shutdown_timeout_ms = 30 * 1000;
 
 static volatile sig_atomic_t g_shutdown = 0;
 
-/* ================= Upload route registry =================
- *
- * HOT PATH: is_upload_route() is called only for multipart requests.
- * The registry is frozen after pthread_create_wrapper().
- */
+/* ================= Upload route registry ================= */
 
 typedef struct {
     char method[16];
@@ -83,7 +79,7 @@ typedef struct {
 } upload_route_t;
 
 static upload_route_t g_upload_routes[MAX_UPLOAD_ROUTES];
-static int g_upload_route_count = 0;
+static _Atomic int g_upload_route_count = 0;
 static int g_upload_routes_frozen = 0;
 static pthread_mutex_t g_upload_routes_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -94,22 +90,23 @@ void mojelly_register_upload_route(const char* method, const char* path) {
         pthread_mutex_unlock(&g_upload_routes_mutex);
         return;
     }
-    if (g_upload_route_count < MAX_UPLOAD_ROUTES) {
-        upload_route_t* r = &g_upload_routes[g_upload_route_count++];
+    int idx = __atomic_load_n(&g_upload_route_count, __ATOMIC_RELAXED);
+    if (idx < MAX_UPLOAD_ROUTES) {
+        upload_route_t* r = &g_upload_routes[idx];
         strncpy(r->method, method, sizeof(r->method) - 1);
         r->method[sizeof(r->method) - 1] = '\0';
         strncpy(r->path, path, sizeof(r->path) - 1);
         r->path[sizeof(r->path) - 1] = '\0';
+        __atomic_store_n(&g_upload_route_count, idx + 1, __ATOMIC_RELEASE);
         fprintf(stderr, "[C] registered upload route: %s %s\n", method, path);
     }
     pthread_mutex_unlock(&g_upload_routes_mutex);
 }
 
 static int is_upload_route(const char* method, const char* path) {
-    int count = g_upload_route_count;
+    int count = __atomic_load_n(&g_upload_route_count, __ATOMIC_ACQUIRE);
     if (count == 0) return 0;
     if (method == NULL || path == NULL) return 0;
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
     for (int i = 0; i < count; i++) {
         if (strcmp(g_upload_routes[i].method, method) == 0 &&
             strcmp(g_upload_routes[i].path, path) == 0) {
@@ -138,12 +135,7 @@ extern char* mojo_handler(void* router, const char* url, const char* method,
 static void* global_router = NULL;
 void mojelly_set_router(void* router) { global_router = router; }
 
-/* ================= Arena allocator =================
- *
- * Arena is FIXED-SIZE: it never realloc()s, so existing buffers that
- * point into a->base stay valid. When full, arena_alloc returns NULL
- * and the caller falls back to malloc.
- */
+/* ================= Arena allocator ================= */
 
 typedef struct {
     char* base;
@@ -174,7 +166,7 @@ static void* arena_alloc(arena_t* a, size_t n) {
         a->used += n;
         return p;
     }
-    /* Arena full: do NOT realloc (it would invalidate other buffers). */
+    /* Arena is fixed-size: never realloc (it would invalidate buffers). */
     return NULL;
 }
 
@@ -216,8 +208,6 @@ static int buf_reserve_arena(buffer_t* b, arena_t* a, size_t need) {
             b->cap = new_cap;
             return 0;
         }
-        /* Arena exhausted: fall back to a heap allocation. Do NOT
-         * realloc() a pointer that lives inside the arena. */
         char* nd = (char*)malloc(new_cap);
         if (!nd) return -1;
         if (b->data && b->len) memcpy(nd, b->data, b->len);
@@ -282,7 +272,6 @@ typedef struct client_ctx {
 
     int expect_files;
 
-    /* Multipart streaming */
     int is_multipart;
     multipart_parser* mp_parser;
     char* mp_boundary;
@@ -621,7 +610,6 @@ static const char* http_500 =
             llhttp_init(&ctx->parser, HTTP_REQUEST, &g_settings);
             ctx->parser.data = ctx;
 
-            /* Drain pipelined data without truncating it. */
             if (ctx->pending.len > 0) {
                 char* pdata = ctx->pending.data;
                 size_t plen = ctx->pending.len;
@@ -680,8 +668,9 @@ static const char* http_500 =
         }
 }
 
-static int extract_status_from_response(const char* response) {
-    if (response == NULL) return 500;
+/* FIX(#4): resp_len-aware; a short/borrowed response must not OOB. */
+static int extract_status_from_response(const char* response, size_t resp_len) {
+    if (response == NULL || resp_len < 12) return 500;
     if (response[0] != 'H' || response[1] != 'T' || response[2] != 'T' ||
         response[3] != 'P' || response[4] != '/')
         return 200;
@@ -723,6 +712,24 @@ static void copy_range(char* dst, size_t dstsz, const char* at, size_t start, si
     dst[n] = '\0';
 }
 
+/* FIX(#1): strip directory components from a client-supplied filename.
+* The file itself is created via mkstemp; this sanitized name is only
+* exposed to application code, but must not be a path-traversal payload. */
+static void sanitize_filename(char* name) {
+    if (name == NULL || name[0] == '\0') return;
+    char* base = name;
+    for (char* p = name; *p != '\0'; p++) {
+        if (*p == '/' || *p == '\\') base = p + 1;
+    }
+    if (base != name) {
+        size_t n = strlen(base);
+        memmove(name, base, n + 1);
+    }
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+        name[0] = '\0';
+    }
+}
+
 static int mp_on_header_field(multipart_parser* p, const char* at, size_t length) {
     client_ctx_t* ctx = (client_ctx_t*)multipart_parser_get_data(p);
     if (length >= 19 && strncasecmp(at, "Content-Disposition", 19) == 0) {
@@ -752,6 +759,7 @@ static int mp_on_header_value(multipart_parser* p, const char* at, size_t length
             size_t end = off;
             while (end < length && at[end] != '"') end++;
             copy_range(ctx->mp_filename, sizeof(ctx->mp_filename), at, off, end);
+            sanitize_filename(ctx->mp_filename);
         }
     } else if (ctx->mp_last_header == MP_HDR_CONTENT_TYPE) {
         safe_copy(ctx->mp_content_type, sizeof(ctx->mp_content_type), at, length);
@@ -786,6 +794,11 @@ static int mp_on_part_data(multipart_parser* p, const char* at, size_t length) {
             ctx->mp_error = 1;
             return -1;
         }
+        /* FIX(#10): total upload size must not exceed g_max_body_size. */
+        if (ctx->mp_total_size + length > g_max_body_size) {
+            ctx->mp_error = 1;
+            return -1;
+        }
         size_t written = fwrite(at, 1, length, ctx->mp_current_file);
         if (written != length) { ctx->mp_error = 1; return -1; }
         ctx->mp_current_size += length;
@@ -797,8 +810,9 @@ static int mp_on_part_data(multipart_parser* p, const char* at, size_t length) {
 static int mp_on_part_data_end(multipart_parser* p) {
     client_ctx_t* ctx = (client_ctx_t*)multipart_parser_get_data(p);
     if (ctx->mp_current_file != NULL) {
-        fflush(ctx->mp_current_file);
-        fclose(ctx->mp_current_file);
+        /* FIX(#5): a failed flush/close means the file on disk is broken. */
+        if (fflush(ctx->mp_current_file) != 0) ctx->mp_error = 1;
+        if (fclose(ctx->mp_current_file) != 0) ctx->mp_error = 1;
         ctx->mp_current_file = NULL;
         ctx->mp_part_count++;
     }
@@ -1001,6 +1015,12 @@ static int on_body_c(llhttp_t* parser, const char* at, size_t length) {
 static int on_message_complete_c(llhttp_t* parser) {
     client_ctx_t* ctx = (client_ctx_t*)parser->data;
 
+    /* FIX(#5): a multipart that failed mid-stream must not reach Mojo. */
+    if (ctx->mp_error) {
+        send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
+        return 0;
+    }
+
     void* router = ctx->router ? ctx->router : global_router;
     if (router == NULL) {
         send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
@@ -1032,7 +1052,7 @@ static int on_message_complete_c(llhttp_t* parser) {
     int keep_alive = ctx->keep_alive;
     if (response != NULL) {
         if (resp_len == 0) resp_len = strlen(response);
-        status = extract_status_from_response(response);
+        status = extract_status_from_response(response, resp_len);
         send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
     } else {
         send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
