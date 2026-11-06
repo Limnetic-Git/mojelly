@@ -199,7 +199,7 @@ def get_close_code_explanation(code: UInt16) raises -> String:
 
 
 def apply_mask(data: Bytes, mask: Bytes) raises -> Bytes:
-    # Маска повторяется каждые четыре байта без выделения промежуточного буфера
+    # Repeat the mask every four bytes without allocating an intermediate buffer
     if len(mask) != 4:
         raise Error("A WebSocket mask must contain four bytes")
     var result = Bytes(capacity=len(data))
@@ -272,7 +272,7 @@ struct Frame(Copyable, Equatable, Movable, Writable):
         return result
 
     def check(self) raises:
-        # Проверяем ограничения RFC 6455 до записи или передачи кадра приложению
+        # Check RFC 6455 constraints before writing a frame or delivering it to the application
         if self.rsv1 or self.rsv2 or self.rsv3:
             raise Error("ProtocolError: reserved bits must be zero")
         if self.opcode not in DATA_OPCODES and self.opcode not in CTRL_OPCODES:
@@ -304,7 +304,7 @@ struct Frame(Copyable, Equatable, Movable, Writable):
             var encoded = int_as_bytes[DType.uint64, True](UInt64(length))
             output.extend(encoded[:])
 
-        # Клиент добавляет случайную маску, сервер отправляет исходную нагрузку
+        # The client adds a random mask, while the server sends the original payload
         if mask:
             var key = gen_mask_func()
             if len(key) != 4:
@@ -322,7 +322,7 @@ struct Frame(Copyable, Equatable, Movable, Writable):
     ](stream_ptr: Pointer[mut=True, T, _], *, mask: Bool) raises -> Optional[
         Frame
     ]:
-        # Сохраняем позицию, чтобы неполный TCP-пакет не потреблял часть кадра
+        # Save the position so an incomplete TCP packet does not consume part of a frame
         var start = stream_ptr[].position()
         var header = stream_ptr[].read_exact(2)
         if not header:

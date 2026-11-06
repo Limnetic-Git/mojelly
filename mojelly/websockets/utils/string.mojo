@@ -53,7 +53,7 @@ struct Message(Copyable, Movable):
 
 
 struct ByteWriter(Movable, Writer):
-    # Writer в Mojo 1.1 принимает текст через write_string
+    # Writer in Mojo 1.1 accepts text through write_string
     var _inner: Bytes
 
     def __init__(out self, capacity: Int = DEFAULT_BUFFER_SIZE):
@@ -85,7 +85,7 @@ struct ByteWriter(Movable, Writer):
 
 
 struct ByteReader(Movable, Sized):
-    # Собственная копия исключает висячие ссылки при возврате срезов из методов
+    # Owning a copy prevents dangling references when methods return slices
     var _inner: Bytes
     var read_pos: Int
 

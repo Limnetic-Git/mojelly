@@ -1,10 +1,10 @@
-# WebSocket на Mojo 1.1.0
+# WebSocket on Mojo 1.1.0
 
-Пакет импортируется как `mojelly.websockets`. Версия компилятора закреплена в `pixi.toml`; стандартная библиотека импортируется через `std`.
+Import the package as `mojelly.websockets`. The compiler version is pinned in `pixi.toml`; import the standard library through `std`.
 
-Реализация использует обычные POSIX-сокеты через Mojo FFI. Отдельные файлы C и специализированные WebSocket-библиотеки для неё не нужны. Поддерживаются синхронный `ws://` и IPv4. TLS для `wss://`, транспорт IPv6 и асинхронный сервер здесь не реализованы.
+The implementation uses ordinary POSIX sockets through Mojo FFI. It requires no separate C source files or specialized WebSocket libraries. It supports synchronous `ws://` connections over IPv4. TLS for `wss://`, IPv6 transport, and an asynchronous server are not implemented.
 
-## Клиент
+## Client
 
 ```mojo
 from mojelly.websockets.sync.client import connect
@@ -12,15 +12,15 @@ from mojelly.websockets.sync.client import connect
 
 def main() raises:
     with connect("ws://127.0.0.1:8080/echo")^ as client:
-        client.send_text("Привет")
+        client.send_text("Hello")
         print(client.recv_text())
 ```
 
-`^` передаёт владение клиентом контекстному менеджеру. Возвращаемая сессия заимствует клиента с отслеживаемым временем жизни. При выходе из блока соединение закрывается. Сам клиент и соединение сервера перемещаются без неявного копирования сокетов.
+`^` transfers ownership of the client to the context manager. The returned session borrows the client with a tracked lifetime. The connection closes when the block exits. Both the client and server connections use move semantics without implicitly copying sockets.
 
-Для двоичных сообщений используйте `send_binary(Bytes(...))` и `recv()`. Метод `recv()` собирает фрагменты до конца сообщения и обрабатывает управляющие кадры между ними. `recv_text()` дополнительно проверяет UTF-8.
+For binary messages, use `send_binary(Bytes(...))` and `recv()`. The `recv()` method assembles fragments until the message is complete and handles control frames between fragments. `recv_text()` also validates UTF-8.
 
-## Сервер
+## Server
 
 ```mojo
 from std.collections import Span
@@ -37,43 +37,43 @@ def main() raises:
         server.serve_forever()
 ```
 
-Обработчик принимает `mut conn`, поскольку отправка меняет состояние протокола. Данные передаются как заимствованный `Span`; для хранения после возврата из обработчика создайте `Bytes(data)`. Обработчик вызывается с собранной нагрузкой сообщения. Этот сервер обслуживает соединения последовательно.
+The handler accepts `mut conn` because sending data changes the protocol state. Data is passed as a borrowed `Span`; create `Bytes(data)` to retain it after the handler returns. The handler receives the assembled message payload. This server handles connections sequentially.
 
-Сокет закрывается при уничтожении владельца. Явное копирование низкоуровневого `Socket` дублирует дескриптор через `dup`; обычная передача соединений использует перемещение.
+The socket closes when its owner is destroyed. Explicitly copying a low-level `Socket` duplicates its descriptor through `dup`; normal connection transfers use move semantics.
 
-## Проверки
+## Tests
 
-Из корня проекта запустите только юнит-тесты:
+Run only the unit tests from the project root:
 
 ```sh
 pixi run test-unit
 ```
 
-46 именованных тестов на Mojo находятся в `tests/unit/websockets.mojo`. Они проверяют преобразование UTF-8 и целых чисел, base64, SHA-1, ключ handshake, URI, буферы, HTTP-заголовки, маскирование, кадры и закрытие соединения. Входные данные фиксированы; сетевые соединения, серверные процессы, текущее время и случайные маски этим тестам не нужны.
+The 46 named Mojo tests in `tests/unit/websockets.mojo` cover UTF-8 and integer conversion, base64, SHA-1, the handshake key, URIs, buffers, HTTP headers, masking, frames, and connection closure. Their inputs are fixed; they require no network connections, server processes, current time, or random masks.
 
-`tests/test_websockets_unit.py` компилирует тестовый бинарный файл один раз и запускает каждую функцию отдельно через стандартный Python `unittest`. В выводе виден результат каждого теста. Запустить те же проверки напрямую на Mojo можно так:
+`tests/test_websockets_unit.py` compiles the test executable once and runs each function separately through Python's standard `unittest` module. The output shows the result of each test. To run the same checks directly with Mojo:
 
 ```sh
 pixi run mojo run -I . tests/unit/websockets.mojo
 ```
 
-Все юнит-тесты и существующие проверки совместимости запускаются одной командой:
+Run all unit tests and the existing interoperability checks with one command:
 
 ```sh
 pixi run test
 ```
 
-Общий запуск включает ещё четыре проверки из `tests/test_websockets.py`: проверку пакета и публичного API, обмен Mojo-сервера с Python-клиентом, отклонение немаскированного кадра и обмен Mojo-клиента с Python-сервером. Сетевые проверки покрывают частичный handshake, нулевые байты, большие и фрагментированные сообщения, ping/pong и close.
+The full run also includes four checks from `tests/test_websockets.py`: package and public API checks, a Mojo server communicating with a Python client, rejection of an unmasked frame, and a Mojo client communicating with a Python server. The network checks cover partial handshakes, zero bytes, large and fragmented messages, ping/pong, and close frames.
 
-Это проверки поведения компонентов и совместимости, а не полный набор испытаний RFC 6455 или нагрузочных тестов.
+These tests check component behavior and interoperability; they are not a complete RFC 6455 conformance suite or a load test suite.
 
-## Изменения при переносе
+## Migration changes
 
-Удалённые `fn`, `alias` и `@value` заменены на `def`, `comptime` и актуальные конструкторы. Обновлены `Writer`, коллекции, индексация строк и операции с указателями. Буферы используют публичные методы `List`; внутренние указатели сохраняют origin владельца. Nullable-указатели libc представлены через `OptionalPointer`.
+The removed `fn`, `alias`, and `@value` constructs have been replaced with `def`, `comptime`, and current constructors. `Writer`, collections, string indexing, and pointer operations have been updated. Buffers use public `List` methods; internal pointers retain their owner's origin. Nullable libc pointers use `OptionalPointer`.
 
-Ключ handshake вычисляется из двоичного SHA-1 digest без промежуточного преобразования в UTF-8. Ключи клиента и маски получают случайные байты ОС. Неполный кадр сохраняется до следующего чтения, а частичная запись продолжается до отправки всего буфера.
+The handshake key is computed from the binary SHA-1 digest without an intermediate UTF-8 conversion. Client keys and masks use random bytes from the OS. An incomplete frame is retained until the next read, and partial writes continue until the entire buffer has been sent.
 
-Происхождение исходного пакета указано в начале каждого файла в `mojelly/websockets`:
+Each file in `mojelly/websockets` starts with the following attribution:
 
 ```text
 # This code is taken from a publicly available repository distributed under the terms of the MIT license:

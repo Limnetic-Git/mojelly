@@ -40,7 +40,7 @@ struct Client(Movable):
         var request = self.protocol.connect()
         self.protocol.send_request(request)
         _ = self.conn.write(self.protocol.data_to_send())
-        # Ответ HTTP может прийти несколькими чтениями, включая разделение CRLF
+        # The HTTP response may span multiple reads, including a split CRLF sequence
         while self.protocol.get_state() != OPEN:
             var buffer = Bytes(capacity=DEFAULT_BUFFER_SIZE)
             if self.conn.read(buffer) == 0:
@@ -115,7 +115,7 @@ def connect(uri: String) raises -> Client:
 
 @fieldwise_init
 struct ClientSession[origin: MutOrigin](ImplicitlyCopyable):
-    # Контекст владеет Client, а сессия хранит отслеживаемое заимствование этого владельца
+    # The context owns Client, and the session holds a tracked borrow of that owner
     var pointer: Pointer[mut=True, Client, Self.origin]
 
     def send_text(self, message: String) raises:

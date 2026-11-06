@@ -124,11 +124,11 @@ Then, you can run your server! 🙂
 Normally is looks like that:
 
 ```console
-~/Документы/Mojo/mojelly-0.0.4
+~/Documents/Mojo/mojelly-0.0.4
 ❯ bash build.sh
 🔍 Checking C core...
 ✅ libmojelly.a is up to date
--rw-r--r-- 1 limnetic limnetic 16872 авг 25 15:50 lib/libmojelly.a
+-rw-r--r-- 1 limnetic limnetic 16872 Aug 25 15:50 lib/libmojelly.a
 
 📢 Calling for server-code generator...
 Failed to initialize Crashpad.  Crash reporting will not be available.  Cause: while locating crashpad handler: unable to locate crashpad handler executable
@@ -140,7 +140,7 @@ Failed to initialize Crashpad.  Crash reporting will not be available.  Cause: w
 Failed to initialize Crashpad.  Crash reporting will not be available.  Cause: while locating crashpad handler: unable to locate crashpad handler executable
 ✅ Server built! Run ./server
 
-~/Документы/Mojo/mojelly-0.0.4
+~/Documents/Mojo/mojelly-0.0.4
 ❯ ./server
 🍇 Mojelly HTTP Server (Multithreaded)
 [C] ✅ All 4 threads created

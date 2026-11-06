@@ -50,7 +50,7 @@ def receive_data[
         var frame = parse_frame[gen_mask_func=gen_mask_func](protocol)
         if not frame:
             break
-    # Удаляем обработанные байты, сохраняя неполный кадр для следующего чтения
+    # Remove processed bytes while preserving an incomplete frame for the next read
     var reader_ptr = protocol.get_reader_ptr()
     if reader_ptr[].offset > 0:
         var remaining = Bytes(reader_ptr[].buffer[reader_ptr[].offset :])

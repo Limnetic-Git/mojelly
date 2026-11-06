@@ -22,7 +22,7 @@ from mojelly.websockets.utils.bytes import str_to_bytes
 
 
 struct WSConnection(Movable):
-    # Соединение владеет транспортом и протоколом без висячих указателей на локальные переменные
+    # Own the transport and protocol without dangling pointers to local variables
     var conn: TCPConnection
     var protocol: ServerProtocol
 
@@ -118,7 +118,7 @@ struct Server[handler: ConnHandler](Movable):
                 _ = websocket.write(websocket.protocol.data_to_send())
                 if response.status_code != 101:
                     break
-                # После handshake в том же TCP-пакете уже может находиться первый кадр
+                # The first frame may follow the handshake in the same TCP packet
                 receive_data(websocket.protocol, Bytes())
             var events = websocket.protocol.events_received()
             for event in events:

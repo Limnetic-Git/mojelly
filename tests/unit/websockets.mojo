@@ -22,7 +22,7 @@ from mojelly.websockets.utils.string import ByteReader, ByteWriter
 from mojelly.websockets.utils.uri import URI
 
 
-# Фиксированная маска из RFC 6455 исключает зависимость тестов от случайных чисел
+# Use the fixed RFC 6455 mask to make tests independent of random values
 def fixed_mask() -> Bytes:
     var result: Bytes = [0x37, 0xFA, 0x21, 0x3D]
     return result^
@@ -148,7 +148,7 @@ def test_sha1_incremental_updates() raises:
     hasher.update("b")
     hasher.update("c")
     assert_equal(hasher.hexdigest(), "a9993e364706816aba3e25717850c26c9cd0d89d")
-    # Чтение digest не должно завершать объект или менять накопленное состояние
+    # Reading the digest must not finalize the object or change its accumulated state
     assert_equal(hasher.hexdigest(), "a9993e364706816aba3e25717850c26c9cd0d89d")
     hasher.update("d")
     assert_equal(hasher.hexdigest(), "81fe8bfe87576c3ecb22426f8e57847382917acf")
@@ -510,7 +510,7 @@ def test_close_counts_reason_in_utf8_bytes() raises:
     assert_true(failed)
 
 
-# Реестр позволяет запускать все проверки или одну именованную проверку
+# The registry supports running all tests or one named test
 comptime UnitTest = def() raises thin -> None
 
 

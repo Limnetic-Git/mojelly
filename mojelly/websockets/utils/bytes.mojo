@@ -1,6 +1,6 @@
 # This code is taken from a publicly available repository distributed under the terms of the MIT license:
 # https://github.com/msaelices/mojo-websockets/blob/main/LICENSE
-"""Преобразование сетевых целых чисел, UTF-8 и двоичных буферов"""
+"""Convert network integers, UTF-8 strings, and binary buffers"""
 
 from std.collections import Span
 from std.ffi import external_call
@@ -15,7 +15,7 @@ comptime EOL = Byte(10)
 
 
 def byte(s: String) -> Byte:
-    """Возвращает первый байт ASCII-разделителя"""
+    """Return the first byte of an ASCII delimiter"""
     return s.as_bytes()[0]
 
 
@@ -24,12 +24,12 @@ def bytes(s: String) -> Bytes:
 
 
 def str_to_bytes(s: String) -> Bytes:
-    """Копирует все байты UTF-8, сохраняя многобайтовые символы"""
+    """Copy every UTF-8 byte, preserving multibyte characters"""
     return Bytes(s.as_bytes())
 
 
 def bytes_to_str(data: Bytes) -> String:
-    """Преобразует байты в строку с заменой некорректных последовательностей UTF-8
+    """Convert bytes to a string, replacing invalid UTF-8 sequences
     """
     return String(from_utf8_lossy=data[:])
 
@@ -37,7 +37,7 @@ def bytes_to_str(data: Bytes) -> String:
 def int_from_bytes[
     dtype: DType, big_endian: Bool = False
 ](data: Span[Byte, _]) raises -> Int:
-    """Читает целое без приведения указателя и требований к выравниванию"""
+    """Read an integer without pointer casts or alignment requirements"""
     comptime width = size_of[Scalar[dtype]]()
     if len(data) != width:
         raise Error("Integer buffer has an invalid length")
@@ -51,7 +51,7 @@ def int_from_bytes[
 def int_as_bytes[
     dtype: DType, big_endian: Bool = False
 ](value: Scalar[dtype]) -> Bytes:
-    """Записывает целое в указанном порядке байтов"""
+    """Write an integer in the requested byte order"""
     comptime width = size_of[Scalar[dtype]]()
     var result = Bytes(length=width, fill=0)
     var remaining = UInt64(value)
@@ -75,7 +75,7 @@ def _format_width(code: Byte) raises -> Int:
 
 
 def unpack(format: String, buffer: Bytes) raises -> List[Int]:
-    """Декодирует поддерживаемые целочисленные форматы Python struct"""
+    """Decode the supported Python struct integer formats"""
     var codes = format.as_bytes()
     var big_endian = is_big_endian()
     var start = 0
@@ -114,7 +114,7 @@ def unpack(format: String, buffer: Bytes) raises -> List[Int]:
 
 
 def pack[format: String](*values: Int) raises -> Bytes:
-    """Кодирует целые числа, проверяя число аргументов и порядок байтов"""
+    """Encode integers, checking the argument count and byte order"""
     var codes = format.as_bytes()
     var big_endian = is_big_endian()
     var start = 0
@@ -138,7 +138,7 @@ def pack[format: String](*values: Int) raises -> Bytes:
 
 
 struct ByteReader(Movable):
-    """Хранит собственную копию буфера без неотслеживаемого заимствования"""
+    """Own a copy of the buffer without an untracked borrow"""
 
     var buffer: Bytes
     var index: Int
@@ -162,7 +162,7 @@ struct ByteReader(Movable):
 
 
 def gen_token(length: Int) -> Bytes:
-    """Получает случайные байты ОС для ключей handshake и масок клиента"""
+    """Get random bytes from the OS for handshake keys and client masks"""
     var result = Bytes(length=length, fill=0)
     comptime if CompilationTarget.is_linux():
         var offset = 0
@@ -192,7 +192,7 @@ def gen_mask() -> Bytes:
 
 
 def decode_base64[validate: Bool = False](encoded: String) raises -> Bytes:
-    """Декодирует base64 в двоичный буфер, не интерпретируя его как UTF-8"""
+    """Decode base64 into a binary buffer without interpreting it as UTF-8"""
     var data = encoded.as_bytes()
     if len(data) % 4 != 0:
         raise Error("Invalid base64 length")

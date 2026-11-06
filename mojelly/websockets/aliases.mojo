@@ -2,7 +2,7 @@
 # https://github.com/msaelices/mojo-websockets/blob/main/LICENSE
 from std.memory import Pointer
 
-# Указатель для границ FFI, где время жизни памяти контролирует вызывающий код
+# Pointer for FFI boundaries where the caller controls the memory lifetime
 comptime CPointer[T: AnyType] = Pointer[mut=True, T, MutUntrackedOrigin]
 
 comptime Bytes = List[Byte]

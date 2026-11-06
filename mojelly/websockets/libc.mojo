@@ -458,7 +458,7 @@ def _inet_ntop(
 def inet_ntop[
     address_family: Int, address_length: Int
 ](var ip_address: UInt32) raises -> String:
-    # Буфер принадлежит списку, nullable-результат libc проверяется до разыменования
+    # The list owns the buffer, and the nullable libc result is checked before dereferencing
     comptime if address_family != AF_INET:
         raise Error("IPv6 requires a 16-byte address")
     var buffer = List[c_char](length=address_length, fill=0)

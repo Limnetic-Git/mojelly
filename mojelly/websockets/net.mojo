@@ -637,7 +637,7 @@ def getaddrinfo[
     hints: T,
     mut res: OptionalPointer[T, MutUntrackedOrigin],
 ) raises:
-    # Пустой service передаётся как NULL, а не как указатель на пустую строку
+    # Pass an empty service as NULL rather than a pointer to an empty string
     var service_ptr: OptionalPointer[c_char, ImmUntrackedOrigin] = None
     if service.byte_length() > 0:
         service_ptr = (

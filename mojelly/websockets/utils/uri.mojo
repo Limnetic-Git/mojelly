@@ -110,7 +110,7 @@ struct URI(Copyable, Movable):
         return self.path
 
     def get_hostname(self) -> String:
-        # Двоеточие в учётных данных не является разделителем порта
+        # A colon in the credentials does not delimit the port
         var start = self.host.rfind("@") + 1
         var end = self.host.find(":", start=start)
         if end < 0:
@@ -132,7 +132,7 @@ struct URI(Copyable, Movable):
         var colon = credentials.find(":")
         if colon < 0:
             return (credentials, String(""))
-        # Пароль может содержать двоеточия, поэтому разделяем только первое
+        # Passwords may contain colons, so split only at the first colon
         return (
             String(credentials[byte=:colon]),
             String(credentials[byte = colon + 1 :]),

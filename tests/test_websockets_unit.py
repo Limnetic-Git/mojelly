@@ -1,4 +1,4 @@
-"""Запускает именованные юнит-тесты Mojo без создания сетевых соединений"""
+"""Run named Mojo unit tests without opening network connections"""
 
 import os
 from pathlib import Path
@@ -26,7 +26,7 @@ class WebSocketUnitTests(unittest.TestCase):
         if (sdk / "share/max/modular.cfg").is_file():
             environment["MODULAR_HOME"] = str(sdk / "share/max")
             environment["PATH"] = str(sdk / "bin") + os.pathsep + environment.get("PATH", "")
-        # Один бинарный файл содержит независимые функции, выбранная функция задаётся аргументом
+        # One executable contains independent test functions selected by a command-line argument
         result = subprocess.run(
             [compiler, "build", "-I", str(ROOT), str(SOURCE), "-o", str(cls.executable)],
             cwd=ROOT, env=environment, capture_output=True, text=True, errors="replace", timeout=90,
@@ -46,7 +46,7 @@ def make_case(name):
     return run_case
 
 
-# Список берётся из исходного файла, поэтому новый тест не нужно регистрировать в Python
+# Read test names from the source so new tests require no registration in Python
 for name in re.findall(r"^def (test_\w+)\(", SOURCE.read_text(), flags=re.MULTILINE):
     setattr(WebSocketUnitTests, name, make_case(name))
 

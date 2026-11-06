@@ -3,18 +3,18 @@
 set -e
 
 # ============================================================
-# КОНФИГУРАЦИЯ
+# CONFIGURATION
 # ============================================================
 
-# true = использовать pixi (Mojo 1.0.0)
-# false = использовать системный Mojo
+# true = use pixi (Mojo 1.0.0)
+# false = use the system Mojo installation
 USE_PIXI=true
 
-# Версия Mojo для pixi
+# Mojo version for pixi
 MOJO_VERSION="1.0.0"
 
 # ============================================================
-# ФУНКЦИИ
+# FUNCTIONS
 # ============================================================
 
 run_mojo() {
@@ -36,7 +36,7 @@ check_mojo_version() {
 }
 
 # ============================================================
-# ПРОВЕРКА ЗАВИСИМОСТЕЙ
+# DEPENDENCY CHECKS
 # ============================================================
 
 if [ "$USE_PIXI" = true ]; then
@@ -48,7 +48,7 @@ if [ "$USE_PIXI" = true ]; then
         exit 1
     fi
 
-    # Проверяем, что pixi.toml существует
+    # Check that pixi.toml exists
     if [ ! -f "pixi.toml" ]; then
         echo "⚠️ pixi.toml not found, creating minimal configuration..."
         cat > pixi.toml << 'EOF'
@@ -72,7 +72,7 @@ EOF
         echo "✅ pixi.toml created"
     fi
 
-    # Проверяем, что Mojo 1.0.0 установлен в pixi
+    # Check that Mojo 1.0.0 is installed in pixi
     if ! pixi list 2>/dev/null | grep -q "mojo"; then
         echo "📦 Installing Mojo $MOJO_VERSION via pixi..."
         pixi add mojo=$MOJO_VERSION
@@ -92,7 +92,7 @@ else
 fi
 
 # ============================================================
-# СБОРКА C CORE
+# BUILD THE C CORE
 # ============================================================
 
 echo ""
@@ -145,7 +145,7 @@ fi
 ls -la lib/libmojelly.a 2>/dev/null || echo "⚠️ libmojelly.a not found!"
 
 # ============================================================
-# ГЕНЕРАЦИЯ СЕРВЕРА
+# GENERATE THE SERVER
 # ============================================================
 
 echo ""
@@ -157,7 +157,7 @@ run_mojo run generator.mojo
 echo ""
 
 # ============================================================
-# СБОРКА СЕРВЕРА
+# BUILD THE SERVER
 # ============================================================
 
 echo "📦 Building server..."
@@ -167,7 +167,7 @@ if [ ! -f "build/app_generated.mojo" ]; then
     exit 1
 fi
 
-# Определяем флаги линковки
+# Determine linker flags
 LINK_FLAGS="-Xlinker -L./lib \
     -Xlinker -lmojelly \
     -Xlinker -luv \
@@ -177,7 +177,7 @@ LINK_FLAGS="-Xlinker -L./lib \
     -Xlinker -lpthread \
     -Xlinker -ldl"
 
-# Добавляем io_uring, если доступен
+# Add io_uring when available
 #if [ -f "/usr/lib/liburing.so" ] || [ -f "/usr/lib/x86_64-linux-gnu/liburing.so" ]; then
 #    echo "io_uring detected, linking..."
 #    LINK_FLAGS="$LINK_FLAGS -Xlinker -luring"

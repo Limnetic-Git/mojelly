@@ -1,0 +1,158 @@
+name: Performance
+
+# Builds main, dev and the PR head, benchmarks all three on the same runner
+# and reports the PR against both. See scripts/perf_run.py / perf_report.py
+# (they can be run locally too).
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Branch the selected ref is gated against (dev or main)"
+        default: "dev"
+      threshold:
+        description: "Max allowed slowdown vs base, in percent"
+        default: "15"
+      reps:
+        description: "Repetitions per build and scenario"
+        default: "3"
+      duration:
+        description: "Seconds measured per run"
+        default: "10"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+env:
+  OHA_VERSION: v1.16.0
+  BASE_BRANCH: ${{ github.base_ref || inputs.base || 'dev' }}
+  THRESHOLD_PERCENT: ${{ inputs.threshold || '15' }}
+  REPS: ${{ inputs.reps || '3' }}
+  DURATION: ${{ inputs.duration || '10' }}
+
+jobs:
+  benchmark:
+    name: Benchmark (main vs dev vs PR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      # The three builds under test.
+      - name: Checkout PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: pr
+
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      - name: Checkout dev
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          path: dev
+
+      # Benchmark scripts come from the merge result, so that older PR
+      # branches that predate them still work.
+      - name: Checkout benchmark scripts
+        uses: actions/checkout@v4
+        with:
+          path: tools
+          sparse-checkout: scripts
+
+      - name: Install system C dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libuv1-dev libssl-dev gcc cmake python3
+          git clone --depth 1 -b release/v9.4.3 https://github.com/nodejs/llhttp.git /tmp/llhttp
+          cmake -B /tmp/llhttp/build -S /tmp/llhttp -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+          cmake --build /tmp/llhttp/build -j
+          sudo cmake --install /tmp/llhttp/build
+          sudo ldconfig
+
+      - name: Install oha
+        run: |
+          curl -fsSL -o oha "https://github.com/hatoo/oha/releases/download/${OHA_VERSION}/oha-linux-amd64"
+          sudo install -m 0755 oha /usr/local/bin/oha
+          oha --version
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.8.1
+        with:
+          pixi-version: v0.80.0
+          cache: true
+          manifest-path: pr/pixi.toml
+
+      - name: Build main, dev and PR
+        run: |
+          for build in main dev pr; do
+            echo "::group::Build $build ($(git -C $build rev-parse --short HEAD))"
+            (cd $build && rm -f lib/libmojelly.a && pixi run build)
+            echo "::endgroup::"
+          done
+
+      - name: Benchmark
+        run: |
+          python3 tools/scripts/perf_run.py \
+            --build main=main --build dev=dev --build pr=pr \
+            --reps "$REPS" --duration "$DURATION" --out results.json
+
+      - name: Report
+        id: report
+        run: |
+          set +e
+          python3 tools/scripts/perf_report.py results.json --pr pr \
+            --base "$BASE_BRANCH" --threshold "$THRESHOLD_PERCENT" --out report.md
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      # PRs from forks get a read-only token and cannot comment; they still
+      # get the job summary above.
+      - name: Comment on the PR
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('report.md', 'utf8');
+            const marker = '<!-- mojelly-perf-report -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments,
+              { owner, repo, issue_number });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment(
+                { owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
+
+      - name: Upload raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results
+          path: |
+            results.json
+            report.md
+
+      - name: Fail on regression
+        if: steps.report.outputs.status != '0'
+        run: |
+          echo "The PR is slower than $BASE_BRANCH beyond the threshold, see the report above."
+          exit 1

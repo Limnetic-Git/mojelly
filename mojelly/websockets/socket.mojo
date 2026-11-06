@@ -136,7 +136,7 @@ struct Socket[AddrType: Addr, address_family: Int = AF_INET](
         self._connected = move._connected
 
     def __init__(out self, *, copy: Self):
-        # Явное копирование создаёт отдельный дескриптор того же соединения
+        # Explicit copying creates a separate descriptor for the same connection
         self.fd = dup(copy.fd) if not copy._closed else -1
         self.socket_type = copy.socket_type
         self.protocol = copy.protocol
@@ -240,7 +240,7 @@ struct Socket[AddrType: Addr, address_family: Int = AF_INET](
         self._remote_address = Self.AddrType(peer[0], peer[1])
 
     def send(self, buffer: Span[Byte, _]) raises -> Int:
-        # Бинарная нагрузка может содержать нулевые байты, в том числе последний
+        # A binary payload may contain zero bytes, including its final byte
         while True:
             var sent = external_call["send", Int](
                 self.fd,
@@ -254,7 +254,7 @@ struct Socket[AddrType: Addr, address_family: Int = AF_INET](
                 raise Error("send failed: ", get_errno())
 
     def send_all(self, buffer: Span[Byte, _], max_attempts: Int = 3) raises:
-        # Частичная запись продолжает отправку с первого ещё не переданного байта
+        # After a partial write, resume at the first byte not yet sent
         var offset = 0
         while offset < len(buffer):
             var sent = self.send(buffer[offset:])
@@ -280,7 +280,7 @@ struct Socket[AddrType: Addr, address_family: Int = AF_INET](
         return UInt(sent)
 
     def _receive(self, mut buffer: Bytes) raises -> UInt:
-        # Расширяем список через публичный API, чтобы recv записывал в живые элементы
+        # Grow the list through its public API so recv writes into initialized elements
         var start = len(buffer)
         var available = max(DEFAULT_BUFFER_SIZE, buffer.capacity() - start)
         for i in range(available):

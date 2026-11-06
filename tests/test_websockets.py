@@ -1,4 +1,4 @@
-"""Проверки Mojo 1.1 и совместимости WebSocket с независимыми TCP-узлами"""
+"""Mojo 1.1 checks and WebSocket interoperability tests with independent TCP peers"""
 
 import base64
 import hashlib
@@ -71,7 +71,7 @@ class WebSocketTests(unittest.TestCase):
         if (sdk / "share/max/modular.cfg").exists():
             cls.environment["MODULAR_HOME"] = str(sdk / "share/max")
             cls.environment["PATH"] = str(sdk / "bin") + os.pathsep + cls.environment.get("PATH", "")
-        # Компиляция всего пакета проверяет и модули вне путей интеграционных тестов
+        # Compiling the entire package also checks modules not exercised by integration tests
         cls.compile(["precompile", "-I", str(ROOT), str(ROOT / "mojelly/websockets"), "-o", str(cls.bin_dir / "websockets.mojoc")], compiler)
         for source, output in [("test_websockets.mojo", "unit"), ("websocket_server_fixture.mojo", "server"), ("websocket_client_fixture.mojo", "client")]:
             cls.compile(["build", "-I", str(ROOT), str(ROOT / "tests" / source), "-o", str(cls.bin_dir / output)], compiler)
@@ -115,7 +115,7 @@ class WebSocketTests(unittest.TestCase):
 
     def test_python_client_mojo_server(self):
         process, connection, stream = self.start_server()
-        # Первый кадр передаётся вместе с handshake, остальные проверяют размеры и нулевые байты
+        # Send the first frame with the handshake, then check payload sizes and zero bytes
         self.handshake(connection, stream, encode_frame(b"pipeline\x00"))
         self.assertEqual(read_frame(stream), (2, b"pipeline\x00"))
         for payload in [b"", "Привет 🌍".encode(), bytes(range(256)), bytes(range(256)) * 256 + b"\x00"]:
@@ -162,7 +162,7 @@ class WebSocketTests(unittest.TestCase):
                         opcode, payload = read_frame(stream)
                         if opcode != 2:
                             raise AssertionError("Expected a binary client frame")
-                        # Ping перемежается с фрагментами двоичного сообщения
+                        # Interleave a ping with fragments of a binary message
                         connection.sendall(encode_frame(b"ping", 9, False) + encode_frame(payload[:4], 2, False, False) + encode_frame(payload[4:], 0, False))
                         if read_frame(stream) != (10, b"ping") or read_frame(stream)[0] != 8:
                             raise AssertionError("Expected pong and close frames")

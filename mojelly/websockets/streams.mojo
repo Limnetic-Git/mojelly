@@ -234,7 +234,7 @@ struct StreamReader(Copyable, Movable, Streamable):
         return Bytes(result)
 
     def read_to_eof(mut self, m: Int) raises -> Optional[Bytes]:
-        # Лимит относится к оставшимся данным и действует до и после EOF
+        # Apply the limit to the remaining data both before and after EOF
         var remaining = len(self.buffer) - self.offset
         if remaining > m:
             raise Error(

@@ -1,42 +1,182 @@
 from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
-from emberjson import try_deserialize, serialize
-
-@fieldwise_init
-struct CreateUserDTO(Movable, Defaultable):
-    var nickname: String
-    var age: Int
-
-    def __init__(out self):
-        self.nickname = ""
-        self.age = 0
-
-    def default() -> Self:
-        var result = Self()
-        result.nickname = ""
-        self.age = 0
-        return result^
-
-def create_user_handler(req: HTTPRequest) -> HTTPResponse: #В АРГУМЕНТЕ ДОЛЖНА БУДЕТ БЫТЬ dto: CreateUserDTO ДЛЯ ПАРСИНГА
-
-    # ВОТ ЭТО ЧАСТЬ ДОЛЖНА БУДЕТ ГЕНЕРИРОВАТЬСЯ
-    var dto_opt = try_deserialize[CreateUserDTO](req.body)
-    if not dto_opt:
-        return HTTPResponse(400, "Invalid parse JSON to DTO")
-    var dto = dto_opt.take()
+from dto import UserDTO
+from test_html_page import test_html_page, test_css
+from test_handlers import dto_validation_test, user_handler
 
 
-    print("Age:", dto.age)
-    var adult = (True if dto.age >= 18 else False)
-    print("Adult:", adult)
-    print("Nickname:", dto.nickname)
+# Hello world plain text response
+def hello_world(mut req: HTTPRequest) -> HTTPResponse:
+    return HTTPResponse(200, "Hello, World")
 
-    return HTTPResponse(200, "OK")
+
+# JSON response
+def json_test(mut req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, '{"nickname":"Limnetic","age":17}')
+    resp.set_json()
+    return resp^
+
+
+# HTML page response
+def html_page_test(mut req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, test_html_page)
+    resp.set_html()
+    return resp^
+
+
+# CSS response
+def css_test(mut req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, test_css)
+    resp.set_css()
+    return resp^
+
+
+# With DTO validation
+# def dto_validation_test(req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+#    if dto.age >= 18:
+#        return HTTPResponse(200, dto.nickname + "is adult")
+#    else:
+#        return HTTPResponse(200, dto.nickname + "is not adult")
+
+
+# With DTO validation from Query String (FastAPI style)
+def get_user_dto_test(mut req: HTTPRequest, dto: UserDTO) -> HTTPResponse:
+    if dto.age >= 18:
+        return HTTPResponse(200, dto.nickname + " is adult (GET)")
+    else:
+        return HTTPResponse(200, dto.nickname + " is minor (GET)")
+
+
+# Echo request header and set response header
+def headers_test(mut req: HTTPRequest) -> HTTPResponse:
+    var incoming = req.get_header("X-Test-Request")
+    var resp = HTTPResponse(200, "Header received: " + incoming)
+    resp.set_header("X-Test-Response", "MojellyOK")
+    return resp^
+
+
+# Echo query string
+def query_test(mut req: HTTPRequest) -> HTTPResponse:
+    return HTTPResponse(
+        200, "Path: " + req.path + ", Query: " + req.query_string
+    )
+
+
+# Read query dictionary
+def query_dict_test(mut req: HTTPRequest) -> HTTPResponse:
+    var name = req.get_query("name", "Guest")
+    var page = req.get_query("page", "1")
+    return HTTPResponse(200, "Hello " + name + ", page " + page)
+
+
+# Set cookie
+def cookie_set_handler(mut req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, "Cookies set!\nGo to /cookies/read")
+    resp.set_cookie(
+        "session",
+        "abc123xyz",
+        max_age=3600,
+        http_only=True,
+        same_site="Lax",
+    )
+    resp.set_cookie(
+        "theme",
+        "dark",
+        max_age=86400,
+        http_only=False,
+        same_site="Lax",
+    )
+    return resp^
+
+
+# Get cookie
+def cookie_read_handler(mut req: HTTPRequest) -> HTTPResponse:
+    var session = req.get_cookie("session")
+    var theme = req.get_cookie("theme")
+
+    var body = String()
+    body += "Cookie values:\n"
+    body += "  session = "
+    if session == "":
+        body += "(not set)"
+    else:
+        body += session
+    body += "\n  theme = "
+    if theme == "":
+        body += "(not set)"
+    else:
+        body += theme
+
+    var resp = HTTPResponse(200, body)
+    return resp^
+
+
+# Delete cookie
+def cookie_delete_handler(mut req: HTTPRequest) -> HTTPResponse:
+    var resp = HTTPResponse(200, "Cookies deleted!")
+    resp.delete_cookie("session")
+    resp.delete_cookie("theme")
+    return resp^
+
+
+# Some path-params handlers:
+def profile_handler(mut req: HTTPRequest) -> HTTPResponse:
+    var login = req.get_param("login")
+    var resp = HTTPResponse(200, "Profile of " + login)
+    return resp^
+
+
+def post_handler(mut req: HTTPRequest) -> HTTPResponse:
+    var user_id = req.get_param("id")
+    var post_id = req.get_param("post_id")
+    var resp = HTTPResponse(200, "Post " + post_id + " by user " + user_id)
+    return resp^
+
+
+def move_page_handler(mut req: HTTPRequest) -> HTTPResponse:
+    var page_id = req.get_param("page_id")
+    var move_to = req.get_param("move_to")
+    var resp = HTTPResponse(200, "Move page " + page_id + " to " + move_to)
+    return resp^
+
+
+# Body with an embedded NUL byte (must reach the client intact)
+def nul_body_test(mut req: HTTPRequest) -> HTTPResponse:
+    var body = String("A")
+    body += chr(0)
+    body += "B"
+    return HTTPResponse(200, body)
+
+
+# Echo the request body with its length (a NUL byte inside must survive)
+def echo_test(mut req: HTTPRequest) -> HTTPResponse:
+    return HTTPResponse(200, String(req.body.byte_length()) + ":" + req.body)
+
 
 def main():
     var router = RouterHandlers()
-    router.post("/users", create_user_handler)
+
+    router.get("/", hello_world)
+    router.get("/json", json_test)
+    router.get("/html", html_page_test)
+    router.get("/style.css", css_test)
+    router.get("/headers", headers_test)
+    router.get("/query", query_test)
+    router.get("/query/dict", query_dict_test)
+    router.get("/nul", nul_body_test)
+    router.post("/echo", echo_test)
+    router.post("/user", dto_validation_test)
+    router.get("/user/query", get_user_dto_test)
+
+    router.get("/cookies/set", cookie_set_handler)
+    router.get("/cookies/read", cookie_read_handler)
+    router.get("/cookies/delete", cookie_delete_handler)
+
+    router.get("/user/:id", user_handler)
+    router.get("/user/:login/profile", profile_handler)
+    router.get("/user/:id/posts/:post_id", post_handler)
+    router.post("/move-page/:page_id/:move_to", move_page_handler)
 
     var server = HTTPServer(router)
     server.listen(8080)
