@@ -1,8 +1,8 @@
 # SHA-1 Hash Implementation in Mojo
 # This code is taken from a publicly available repository distributed under the terms of the MIT license:
-# https://github.com/lczerniawski/crypto/tree/main?tab=readme-ov-file
+# https://github.com/lczerniawski/crypto/blob/main/LICENSE
 
-from ..helpers import _rotate_left, _to_hex
+from helpers import _rotate_left, _to_hex
 
 comptime k0: UInt32 = 0x5A827999  # 0 <= t <= 19
 comptime k1: UInt32 = 0x6ED9EBA1  # 20 <= t <= 39
@@ -32,7 +32,6 @@ def _f2(b: UInt32, c: UInt32, d: UInt32) -> UInt32:
 @always_inline
 def _f3(b: UInt32, c: UInt32, d: UInt32) -> UInt32:
     return b ^ c ^ d
-
 
 def sha1(data: Span[UInt8, ...]) -> SHA1Digest:
     """

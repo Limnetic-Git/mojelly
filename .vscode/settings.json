@@ -1,4 +1,8 @@
 {
     "editor.semanticHighlighting.enabled": true,
-    "C_Cpp.enhancedColorization": "enabled"
+    "C_Cpp.enhancedColorization": "enabled",
+    "mojo.sdk.path": "/home/user/Документы/GitHub/mojelly/.pixi/envs/default",
+    "mojo.lsp.includeDirs": [
+        "/home/user/Документы/GitHub/mojelly"
+    ],
 }
