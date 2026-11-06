@@ -16,6 +16,9 @@ MOJO_VERSION="1.0.0"
 # ============================================================
 # FUNCTIONS
 # ============================================================
+USE_PIXI=true
+MOJO_VERSION="1.1.0"
+SHOW_WARNINGS=false
 
 run_mojo() {
     if [ "$USE_PIXI" = true ]; then
@@ -28,10 +31,10 @@ run_mojo() {
 check_mojo_version() {
     if [ "$USE_PIXI" = true ]; then
         local version=$(pixi run mojo --version 2>/dev/null || echo "unknown")
-        echo "📌 Mojo version (pixi): $version"
+        echo "🔥 Mojo version (pixi): $version"
     else
         local version=$(mojo --version 2>/dev/null || echo "unknown")
-        echo "📌 Mojo version (system): $version"
+        echo "🔥 Mojo version (system): $version"
     fi
 }
 
@@ -62,7 +65,7 @@ channels = [
 platforms = ["linux-64"]
 
 [dependencies]
-mojo = "==1.0.0"
+mojo = "==1.1.0"
 emberjson = ">=0.3.0"
 
 [tasks]
@@ -79,7 +82,7 @@ EOF
         pixi add emberjson -c https://repo.prefix.dev/modular-community
     fi
 
-    echo "📌 Using Mojo via pixi:"
+    echo "🔥 Using Mojo via pixi:"
     pixi run mojo --version
 else
     echo "🔧 Using system Mojo..."
@@ -123,6 +126,8 @@ if [ "$NEED_REBUILD" = true ]; then
     gcc -c bridge.c -o bridge.o \
         -I/usr/include \
         -I/usr/include/llhttp \
+        -I/usr/local/include \
+        -I/usr/local/include/llhttp \
         -fPIC -pthread \
         -O3 -march=native -mtune=native -pipe \
         -funroll-loops -ffast-math
@@ -130,6 +135,7 @@ if [ "$NEED_REBUILD" = true ]; then
     gcc -c bridge_ssl.c -O3 -o bridge_ssl.o \
         -I/usr/include \
         -I/usr/include/openssl \
+        -I/usr/local/include \
         -fPIC \
         2>/dev/null || echo "⚠️ bridge_ssl.c not found or failed to compile"
 
@@ -169,6 +175,7 @@ fi
 
 # Determine linker flags
 LINK_FLAGS="-Xlinker -L./lib \
+    -Xlinker -L/usr/local/lib \
     -Xlinker -lmojelly \
     -Xlinker -luv \
     -Xlinker -lllhttp \
@@ -184,6 +191,11 @@ LINK_FLAGS="-Xlinker -L./lib \
 #fi
 
 run_mojo build -I. build/app_generated.mojo -O3 -o server $LINK_FLAGS
+if [ "$SHOW_WARNINGS" = true ]; then
+    run_mojo build -I. -I examples build/app_generated.mojo -O3 -o server $LINK_FLAGS
+else
+    run_mojo build --disable-warnings -I. -I examples build/app_generated.mojo -O3 -o server $LINK_FLAGS
+fi
 
 echo ""
 echo "✅ Server built! Run ./server"

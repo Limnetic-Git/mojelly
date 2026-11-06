@@ -16,3 +16,11 @@ emberjson = ">=0.3.0"
 [tasks]
 test-unit = "python3 -m unittest discover -s tests -p test_websockets_unit.py -v"
 test = "python3 -m unittest discover -s tests -p 'test_*.py' -v"
+emberjson = ">=0.4.0"
+
+[tasks]
+build = "bash build.sh"
+run = "./server"
+test = "bash run_tests.sh"
+lint = "bash lint.sh"
+fmt = "mojo format mojelly examples tests generator.mojo"

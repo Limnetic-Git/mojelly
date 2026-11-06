@@ -1,2 +1,9 @@
-
 .vscode/settings.json
+build/
+/build
+lib/
+/lib
+server
+__pycache__/
+*.pyc
+.mojo_cache/
