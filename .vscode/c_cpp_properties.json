@@ -1,0 +1,19 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "compilerPath": "/usr/bin/gcc",
+            "compilerArgs": [
+                "-pthread",
+                "-idirafter",
+                "/run/host/usr/include"
+            ],
+            "intelliSenseMode": "linux-gcc-x64",
+            "cStandard": "gnu11",
+            "includePath": [
+                "${workspaceFolder}/src_c"
+            ]
+        }
+    ],
+    "version": 4
+}

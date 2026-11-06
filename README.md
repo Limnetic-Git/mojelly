@@ -139,8 +139,8 @@ Mojo 1.1.0 (ed45d567)
 
 ✅ Server built! Run ./server
 
-   To run:
-   ./server
+To run:
+./server
 
 ❯ ./server
 🍇 Mojelly HTTP Server (Multithreaded)

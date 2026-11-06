@@ -2,6 +2,20 @@
 
 set -e
 
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+# true = use pixi (Mojo 1.0.0)
+# false = use the system Mojo installation
+USE_PIXI=true
+
+# Mojo version for pixi
+MOJO_VERSION="1.0.0"
+
+# ============================================================
+# FUNCTIONS
+# ============================================================
 USE_PIXI=true
 MOJO_VERSION="1.1.0"
 SHOW_WARNINGS=false
@@ -24,6 +38,10 @@ check_mojo_version() {
     fi
 }
 
+# ============================================================
+# DEPENDENCY CHECKS
+# ============================================================
+
 if [ "$USE_PIXI" = true ]; then
     echo "🔧 Using pixi environment..."
 
@@ -32,6 +50,8 @@ if [ "$USE_PIXI" = true ]; then
         echo "   curl -fsSL https://pixi.sh/install.sh | bash"
         exit 1
     fi
+
+    # Check that pixi.toml exists
     if [ ! -f "pixi.toml" ]; then
         echo "⚠️ pixi.toml not found, creating minimal configuration..."
         cat > pixi.toml << 'EOF'
@@ -54,6 +74,8 @@ run = "./server"
 EOF
         echo "✅ pixi.toml created"
     fi
+
+    # Check that Mojo 1.0.0 is installed in pixi
     if ! pixi list 2>/dev/null | grep -q "mojo"; then
         echo "📦 Installing Mojo $MOJO_VERSION via pixi..."
         pixi add mojo=$MOJO_VERSION
@@ -71,6 +93,10 @@ else
     fi
     mojo --version
 fi
+
+# ============================================================
+# BUILD THE C CORE
+# ============================================================
 
 echo ""
 echo "🔍 Checking C core..."
@@ -124,6 +150,10 @@ fi
 
 ls -la lib/libmojelly.a 2>/dev/null || echo "⚠️ libmojelly.a not found!"
 
+# ============================================================
+# GENERATE THE SERVER
+# ============================================================
+
 echo ""
 echo "📢 Calling for server-code generator..."
 mkdir -p build
@@ -131,6 +161,11 @@ mkdir -p build
 run_mojo run generator.mojo
 
 echo ""
+
+# ============================================================
+# BUILD THE SERVER
+# ============================================================
+
 echo "📦 Building server..."
 
 if [ ! -f "build/app_generated.mojo" ]; then
@@ -138,6 +173,7 @@ if [ ! -f "build/app_generated.mojo" ]; then
     exit 1
 fi
 
+# Determine linker flags
 LINK_FLAGS="-Xlinker -L./lib \
     -Xlinker -L/usr/local/lib \
     -Xlinker -lmojelly \
@@ -148,6 +184,13 @@ LINK_FLAGS="-Xlinker -L./lib \
     -Xlinker -lpthread \
     -Xlinker -ldl"
 
+# Add io_uring when available
+#if [ -f "/usr/lib/liburing.so" ] || [ -f "/usr/lib/x86_64-linux-gnu/liburing.so" ]; then
+#    echo "io_uring detected, linking..."
+#    LINK_FLAGS="$LINK_FLAGS -Xlinker -luring"
+#fi
+
+run_mojo build -I. build/app_generated.mojo -O3 -o server $LINK_FLAGS
 if [ "$SHOW_WARNINGS" = true ]; then
     run_mojo build -I. -I examples build/app_generated.mojo -O3 -o server $LINK_FLAGS
 else

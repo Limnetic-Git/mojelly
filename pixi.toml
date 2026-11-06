@@ -2,7 +2,7 @@
 [workspace]
 name = "mojelly"
 channels = [
-    "https://conda.modular.com/max-nightly",
+    "https://conda.modular.com/max",
     "https://repo.prefix.dev/modular-community",
     "conda-forge",
 ]
@@ -11,6 +11,11 @@ version = "0.6.0"
 
 [dependencies]
 mojo = "==1.1.0"
+emberjson = ">=0.3.0"
+
+[tasks]
+test-unit = "python3 -m unittest discover -s tests -p test_websockets_unit.py -v"
+test = "python3 -m unittest discover -s tests -p 'test_*.py' -v"
 emberjson = ">=0.4.0"
 
 [tasks]
