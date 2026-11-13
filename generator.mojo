@@ -349,6 +349,7 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
     patterns["router.delete("] = "DELETE"
     patterns["router.patch("] = "PATCH"
     patterns["router.add("] = "GET"
+    patterns["router.post_upload("] = "POST"
 
     for line_span in lines:
         var line = String(line_span)
@@ -361,10 +362,12 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
         var path = ""
         var handler = ""
         var found = False
+        var is_upload = False
 
         for pattern in patterns.keys():
             if pattern in trimmed:
                 method = patterns.get(pattern, "")
+                is_upload = pattern == "router.post_upload("
                 var start = trimmed.find(pattern) + len(pattern.as_bytes())
                 var end = trimmed.rfind(")")
                 if start != -1 and end != -1 and start < end:
@@ -430,6 +433,8 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
 
         if found and path != "" and handler != "":
             var key = method + ":" + path
+            if is_upload:
+                key = "UPLOAD:" + key
             routes[key] = handler
 
     return routes^
@@ -734,23 +739,47 @@ def generate_routes_code(
 
     for i in range(len(keys)):
         var key = keys[i]
+        var is_upload = key.startswith("UPLOAD:")
+        if is_upload:
+            var stripped = String(key[byte = 7 : len(key.as_bytes())])
+            key = stripped^
+
         var colon = key.find(":")
         var method = String(key[byte=0:colon])
         var path = String(key[byte = colon + 1 : len(key.as_bytes())])
-        var handler = routes.get(key, "")
+        var handler = routes.get(keys[i], "")
         if handler != "":
             var registered_handler = handler
             if handler_dtos.get(handler, "") != "":
                 registered_handler = generated_dto_wrapper_name(handler)
-            code += (
-                '    router_ptr[].add("'
-                + method
-                + '", "'
-                + path
-                + '", '
-                + registered_handler
-                + ")\n"
-            )
+
+            if is_upload:
+                code += (
+                    "    mojelly_register_upload_route("
+                    + 'string_to_c_string("'
+                    + method
+                    + '"), '
+                    + 'string_to_c_string("'
+                    + path
+                    + '"))\n'
+                )
+                code += (
+                    '    router_ptr[].post_upload("'
+                    + path
+                    + '", '
+                    + registered_handler
+                    + ")\n"
+                )
+            else:
+                code += (
+                    '    router_ptr[].add("'
+                    + method
+                    + '", "'
+                    + path
+                    + '", '
+                    + registered_handler
+                    + ")\n"
+                )
     return code
 
 
@@ -824,7 +853,6 @@ def main():
     print("🍇 Mojelly HTTP Server (Multithreaded)")
 
     var port: Int32 = 8080
-    # 0 = auto: one worker per allowed CPU, or MOJELLY_THREADS if set
     var num_threads: Int32 = 0
 
     var layout = Layout[RouterHandlers].single()
@@ -843,8 +871,7 @@ ROUTES_PLACEHOLDER
     print("✅ Worker threads started")
     print("🚀 Server listening on port", port)
 
-    while True:
-        sleep(1000)
+    wait_for_shutdown()
 """
     main_code_by_mode[
         False
@@ -870,7 +897,7 @@ ROUTES_PLACEHOLDER
 # For cool guys only 😎
 # ============================================================
 
-from mojelly.http.request import HTTPRequest
+from mojelly.http.request import HTTPRequest, MultipartData, FilePart
 from mojelly.http.response import HTTPResponse, get_status_phrase, _has_crlf, _strip_crlf
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
@@ -900,7 +927,7 @@ comptime C_uv_loop = Pointer[uv_loop_t, MutUntrackedOrigin]
 comptime C_uv_tcp = Pointer[uv_tcp_t, MutUntrackedOrigin]
 
 # ============================================================
-# STRUCTURES FOR C
+# STRUCTURES FOR C (must match c_form_field_t / c_file_part_t)
 # ============================================================
 
 struct uv_loop_t:
@@ -908,6 +935,20 @@ struct uv_loop_t:
 
 struct uv_tcp_t:
     var _data: Pointer[UInt8, MutUntrackedOrigin]
+
+@fieldwise_init
+struct CFormField(Movable):
+    var name: C_UInt8
+    var value: C_UInt8
+    var value_len: UInt64
+
+@fieldwise_init
+struct CFilePart(Movable):
+    var name: C_UInt8
+    var filename: C_UInt8
+    var content_type: C_UInt8
+    var path: C_UInt8
+    var size: UInt64
 
 # ============================================================
 # WRAPPERS FOR C-FUNCS
@@ -943,8 +984,14 @@ def uv_close_wrapper(client: C_uv_tcp) -> None:
 def mojelly_set_router(router: C_void) -> None:
     external_call["mojelly_set_router", NoneType, C_void](router)
 
+def mojelly_register_upload_route(method: C_UInt8, path: C_UInt8) -> None:
+    external_call["mojelly_register_upload_route", NoneType, C_UInt8, C_UInt8](method, path)
+
 def pthread_create_wrapper(port: Int32, router: C_void, num_threads: Int32) -> None:
     external_call["pthread_create_wrapper", NoneType, Int32, C_void, Int32](port, router, num_threads)
+
+def wait_for_shutdown() -> None:
+    external_call["wait_for_shutdown", NoneType]()
 
 def mojelly_free_response(ptr: C_UInt8) -> None:
     external_call["mojelly_free_response", NoneType, C_UInt8](ptr)
@@ -959,8 +1006,6 @@ def c_string_to_string(ptr: C_UInt8) -> String:
         len += 1
     return bytes_to_string(ptr, len)
 
-# The C side knows the lengths, so no search for the terminator is needed
-# (and a NUL byte inside the data no longer ends it).
 def bytes_to_string(ptr: C_UInt8, len: Int) -> String:
     if len == 0:
         return ""
@@ -976,7 +1021,37 @@ def string_to_c_string(s: String) -> C_UInt8:
     ptr.unsafe_offset(len).unsafe_write(0)
     return ptr
 
+# ============================================================
+# MULTIPART (FFI-array, no JSON)
+# ============================================================
 
+def _build_multipart(
+    form_ptr: Pointer[CFormField, MutUntrackedOrigin],
+    form_count: UInt64,
+    files_ptr: Pointer[CFilePart, MutUntrackedOrigin],
+    file_count: UInt64,
+) -> Optional[MultipartData]:
+    try:
+        if form_count == 0 and file_count == 0:
+            return None
+        var mp = MultipartData()
+        for i in range(Int(form_count)):
+            ref f = form_ptr.unsafe_offset(i)[]
+            var name = c_string_to_string(f.name)
+            var value = bytes_to_string(f.value, Int(f.value_len))
+            mp.form[name] = value
+        for i in range(Int(file_count)):
+            ref f = files_ptr.unsafe_offset(i)[]
+            mp.files.append(FilePart(
+                name=c_string_to_string(f.name),
+                filename=c_string_to_string(f.filename),
+                content_type=c_string_to_string(f.content_type),
+                size=Int(f.size),
+                path=c_string_to_string(f.path),
+            ))
+        return Optional[MultipartData](mp^)
+    except:
+        return None
 
 # ============================================================
 # EXPORTING FUNC
@@ -993,10 +1068,12 @@ def mojo_handler(
     out_ownership: Pointer[Int32, MutUntrackedOrigin],
     url_len: UInt64,
     headers_len: UInt64,
-    body_len: UInt64
+    body_len: UInt64,
+    form_ptr: Pointer[CFormField, MutUntrackedOrigin],
+    form_count: UInt64,
+    files_ptr: Pointer[CFilePart, MutUntrackedOrigin],
+    file_count: UInt64
 ) abi("C") -> C_UInt8:
-    # The response is malloc'ed here and freed by the C side (MOJO_RESP_OWNED = 0);
-    # its real length goes to out_len so bodies containing NUL bytes survive.
     out_ownership[] = 0
 
     if not router_ptr:
@@ -1012,8 +1089,8 @@ def mojo_handler(
 
     var request = HTTPRequest(url=url, method=method)
     request.body = body
-    # Lazy: headers/cookies/query are parsed on first access inside handlers.
     request._headers_raw = headers_str
+    request.multipart = _build_multipart(form_ptr, form_count, files_ptr, file_count)
 
     var router_response = router[].handle(request)
 

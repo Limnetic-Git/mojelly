@@ -165,10 +165,12 @@ struct RouterHandlers:
     var exact: Dict[String, Dict[String, Handler]]
 
     var patterns: List[CompiledPattern]
+    var upload_routes: Dict[String, Bool]
 
     def __init__(out self):
         self.exact = Dict[String, Dict[String, Handler]]()
         self.patterns = List[CompiledPattern]()
+        self.upload_routes = Dict[String, Bool]()
 
     def _insert_exact(
         mut self, method: String, path: String, handler: Handler
@@ -212,6 +214,13 @@ struct RouterHandlers:
 
     def patch(mut self, path: String, handler: Handler):
         self.add("PATCH", path, handler)
+
+    def post_upload(mut self, path: String, handler: Handler):
+        self.add("POST", path, handler)
+        self.upload_routes["POST:" + path] = True
+
+    def is_upload_route(self, method: String, path: String) -> Bool:
+        return (method + ":" + path) in self.upload_routes
 
     def handle(self, mut request: HTTPRequest) -> HTTPResponse:
         var method = request.method
