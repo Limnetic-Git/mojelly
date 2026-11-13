@@ -897,7 +897,7 @@ ROUTES_PLACEHOLDER
 # For cool guys only 😎
 # ============================================================
 
-from mojelly.http.request import HTTPRequest
+from mojelly.http.request import HTTPRequest, MultipartData, FilePart
 from mojelly.http.response import HTTPResponse, get_status_phrase, _has_crlf, _strip_crlf
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
@@ -927,7 +927,7 @@ comptime C_uv_loop = Pointer[uv_loop_t, MutUntrackedOrigin]
 comptime C_uv_tcp = Pointer[uv_tcp_t, MutUntrackedOrigin]
 
 # ============================================================
-# STRUCTURES FOR C
+# STRUCTURES FOR C (must match c_form_field_t / c_file_part_t)
 # ============================================================
 
 struct uv_loop_t:
@@ -935,6 +935,20 @@ struct uv_loop_t:
 
 struct uv_tcp_t:
     var _data: Pointer[UInt8, MutUntrackedOrigin]
+
+@fieldwise_init
+struct CFormField(Movable):
+    var name: C_UInt8
+    var value: C_UInt8
+    var value_len: UInt64
+
+@fieldwise_init
+struct CFilePart(Movable):
+    var name: C_UInt8
+    var filename: C_UInt8
+    var content_type: C_UInt8
+    var path: C_UInt8
+    var size: UInt64
 
 # ============================================================
 # WRAPPERS FOR C-FUNCS
@@ -1008,6 +1022,38 @@ def string_to_c_string(s: String) -> C_UInt8:
     return ptr
 
 # ============================================================
+# MULTIPART (FFI-array, no JSON)
+# ============================================================
+
+def _build_multipart(
+    form_ptr: Pointer[CFormField, MutUntrackedOrigin],
+    form_count: UInt64,
+    files_ptr: Pointer[CFilePart, MutUntrackedOrigin],
+    file_count: UInt64,
+) -> Optional[MultipartData]:
+    try:
+        if form_count == 0 and file_count == 0:
+            return None
+        var mp = MultipartData()
+        for i in range(Int(form_count)):
+            ref f = form_ptr.unsafe_offset(i)[]
+            var name = c_string_to_string(f.name)
+            var value = bytes_to_string(f.value, Int(f.value_len))
+            mp.form[name] = value
+        for i in range(Int(file_count)):
+            ref f = files_ptr.unsafe_offset(i)[]
+            mp.files.append(FilePart(
+                name=c_string_to_string(f.name),
+                filename=c_string_to_string(f.filename),
+                content_type=c_string_to_string(f.content_type),
+                size=Int(f.size),
+                path=c_string_to_string(f.path),
+            ))
+        return Optional[MultipartData](mp^)
+    except:
+        return None
+
+# ============================================================
 # EXPORTING FUNC
 # ============================================================
 
@@ -1022,7 +1068,11 @@ def mojo_handler(
     out_ownership: Pointer[Int32, MutUntrackedOrigin],
     url_len: UInt64,
     headers_len: UInt64,
-    body_len: UInt64
+    body_len: UInt64,
+    form_ptr: Pointer[CFormField, MutUntrackedOrigin],
+    form_count: UInt64,
+    files_ptr: Pointer[CFilePart, MutUntrackedOrigin],
+    file_count: UInt64
 ) abi("C") -> C_UInt8:
     out_ownership[] = 0
 
@@ -1040,6 +1090,7 @@ def mojo_handler(
     var request = HTTPRequest(url=url, method=method)
     request.body = body
     request._headers_raw = headers_str
+    request.multipart = _build_multipart(form_ptr, form_count, files_ptr, file_count)
 
     var router_response = router[].handle(request)
 

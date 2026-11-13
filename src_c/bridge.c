@@ -65,7 +65,6 @@ static _Thread_local int current_thread_id = -1;
 static size_t g_max_header_size = 64UL << 10;
 static size_t g_max_body_size = 10UL << 20;
 static size_t g_max_file_size = 100UL << 20;
-/* 2.1: limits for multipart text fields. */
 static size_t g_max_field_size = 1UL << 20;   /* 1 MB per text field */
 static int g_max_parts = 100;                 /* max number of parts (files + fields) */
 static long g_idle_timeout_ms = 60 * 1000;
@@ -125,16 +124,32 @@ static void freeze_upload_routes(void) {
     pthread_mutex_unlock(&g_upload_routes_mutex);
 }
 
-/* ================= Mojo ================= */
+/* ================= Mojo (FFI-array, 2.3) ================= */
 
 #define MOJO_RESP_OWNED 0
 #define MOJO_RESP_BORROWED 1
 
+/* 2.3: struct layouts must match Mojo structs exactly. */
+typedef struct {
+    const char* name;
+    const char* value;
+    size_t value_len;
+} c_form_field_t;
+
+typedef struct {
+    const char* name;
+    const char* filename;
+    const char* content_type;
+    const char* path;
+    size_t size;
+} c_file_part_t;
+
 extern char* mojo_handler(void* router, const char* url, const char* method,
                           const char* headers, const char* body,
-                          size_t* out_len, int* out_ownership, size_t url_len,
-                          size_t headers_len, size_t body_len,
-                          const char* multipart_json, size_t multipart_json_len);
+                          size_t* out_len, int* out_ownership,
+                          size_t url_len, size_t headers_len, size_t body_len,
+                          c_form_field_t* form, size_t form_count,
+                          c_file_part_t* files, size_t file_count);
 
 static void* global_router = NULL;
 void mojelly_set_router(void* router) { global_router = router; }
@@ -170,7 +185,6 @@ static void* arena_alloc(arena_t* a, size_t n) {
         a->used += n;
         return p;
     }
-    /* Arena is fixed-size: never realloc (it would invalidate buffers). */
     return NULL;
 }
 
@@ -252,14 +266,12 @@ typedef enum {
     MP_HDR_OTHER
 } mp_header_t;
 
-/* 2.1: one text form field parsed from multipart. */
 typedef struct {
     char name[256];
-    char* value;       /* heap-allocated, NUL-terminated */
+    char* value;
     size_t value_len;
 } mp_form_field_t;
 
-/* 2.2: one file part parsed from multipart. */
 typedef struct {
     char name[256];
     char filename[256];
@@ -306,13 +318,11 @@ typedef struct client_ctx {
     int mp_part_count;
     int mp_error;
 
-    /* 2.1: text form fields. */
     buffer_t mp_field_value;
-    mp_form_field_t mp_form[100];   /* size == g_max_parts upper bound */
+    mp_form_field_t mp_form[100];
     int mp_form_count;
 
-    /* 2.2: file parts. */
-    mp_file_part_t mp_files[100];   /* size == g_max_parts upper bound */
+    mp_file_part_t mp_files[100];
     int mp_file_count;
 } client_ctx_t;
 
@@ -341,7 +351,6 @@ static client_ctx_t* ctx_alloc(void) {
     return c;
 }
 
-/* 2.1: free all heap-allocated form field values. */
 static void mp_form_reset(client_ctx_t* c) {
     for (int i = 0; i < c->mp_form_count; i++) {
         if (c->mp_form[i].value) {
@@ -354,7 +363,6 @@ static void mp_form_reset(client_ctx_t* c) {
     c->mp_form_count = 0;
 }
 
-/* 2.2: unlink and reset file parts. */
 static void mp_files_reset(client_ctx_t* c) {
     for (int i = 0; i < c->mp_file_count; i++) {
         if (c->mp_files[i].path[0]) {
@@ -375,10 +383,8 @@ static void ctx_free(client_ctx_t* c) {
     if (c->mp_boundary) { free(c->mp_boundary); c->mp_boundary = NULL; }
     if (c->mp_current_file) { fclose(c->mp_current_file); c->mp_current_file = NULL; }
     if (c->mp_temp_path[0]) { unlink(c->mp_temp_path); c->mp_temp_path[0] = '\0'; }
-    /* 2.1: free text form fields. */
     mp_form_reset(c);
     buf_free(&c->mp_field_value);
-    /* 2.2: unlink file parts. */
     mp_files_reset(c);
     arena_free(&c->arena);
     buf_free(&c->url);
@@ -526,7 +532,6 @@ static void mojelly_init_settings(void) {
         g_max_body_size = (size_t)atol(v);
     if ((v = getenv("MOJELLY_MAX_FILE_SIZE")) && atol(v) > 0)
         g_max_file_size = (size_t)atol(v);
-    /* 2.1: text field limits. */
     if ((v = getenv("MOJELLY_MAX_FIELD_SIZE")) && atol(v) > 0)
         g_max_field_size = (size_t)atol(v);
     if ((v = getenv("MOJELLY_MAX_PARTS")) && atoi(v) > 0)
@@ -555,199 +560,195 @@ static inline void ensure_settings_init(void) {
 
 static const char* http_500 =
 "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-static const char* http_413 =
-"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-static const char* http_431 =
-"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-static const char* http_415 =
-"HTTP/1.1 415 Unsupported Media Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-static const char* http_400 =
-"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    static const char* http_413 =
+    "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    static const char* http_431 =
+    "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    static const char* http_415 =
+    "HTTP/1.1 415 Unsupported Media Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    static const char* http_400 =
+    "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
-/* ================= Logging helpers ================= */
+    /* ================= Logging helpers ================= */
 
-static const char* get_method_color(const char* method) {
-    if (strcmp(method, "GET") == 0) return COLOR_CYAN;
-    if (strcmp(method, "POST") == 0) return COLOR_GREEN;
-    if (strcmp(method, "PUT") == 0) return COLOR_YELLOW;
-    if (strcmp(method, "DELETE") == 0) return COLOR_RED;
-    if (strcmp(method, "PATCH") == 0) return COLOR_MAGENTA;
-    return COLOR_BLUE;
-}
-
-static const char* get_status_color(int status) {
-    if (status >= 200 && status < 300) return COLOR_GREEN;
-    if (status >= 300 && status < 400) return COLOR_CYAN;
-    if (status >= 400 && status < 500) return COLOR_YELLOW;
-    if (status >= 500) return COLOR_RED;
-    return COLOR_RESET;
-}
-
-static void log_request(const char* method, const char* url, int status, double duration_ms) {
-    const char* mc = get_method_color(method);
-    const char* sc = get_status_color(status);
-    static _Thread_local time_t cached_at = 0;
-    static _Thread_local char time_str[20] = "00:00:00";
-    time_t now = time(NULL);
-    if (now != cached_at) {
-        struct tm tm_info;
-        localtime_r(&now, &tm_info);
-        strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_info);
-        cached_at = now;
+    static const char* get_method_color(const char* method) {
+        if (strcmp(method, "GET") == 0) return COLOR_CYAN;
+        if (strcmp(method, "POST") == 0) return COLOR_GREEN;
+        if (strcmp(method, "PUT") == 0) return COLOR_YELLOW;
+        if (strcmp(method, "DELETE") == 0) return COLOR_RED;
+        if (strcmp(method, "PATCH") == 0) return COLOR_MAGENTA;
+        return COLOR_BLUE;
     }
-    printf("[%s] [T%d] %s%s%s %s%s%s %s%d%s %.2fms\n", time_str,
-            current_thread_id, mc, method, COLOR_RESET, COLOR_BOLD,
-            url, COLOR_RESET, sc, status, COLOR_RESET, duration_ms);
-}
 
-/* ================= Conn list ================= */
-
-static _Thread_local client_ctx_t* conn_list = NULL;
-
-static void conn_link(client_ctx_t* ctx) {
-    ctx->prev = NULL;
-    ctx->next = conn_list;
-    if (conn_list) conn_list->prev = ctx;
-    conn_list = ctx;
-    ctx->linked = 1;
-}
-
-static void conn_unlink(client_ctx_t* ctx) {
-    if (!ctx->linked) return;
-    if (ctx->prev) ctx->prev->next = ctx->next;
-    else conn_list = ctx->next;
-    if (ctx->next) ctx->next->prev = ctx->prev;
-    ctx->linked = 0;
-}
-
-/* ================= forward ================= */
-
-static void on_close_c(uv_handle_t* handle);
-static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
-static void send_response(uv_tcp_t* client, const char* response, size_t len,
-                            int keep_alive, int owned);
-
-/* ================= close ================= */
-
-static void on_close_c(uv_handle_t* handle) {
-    client_ctx_t* ctx = (client_ctx_t*)handle->data;
-    if (ctx == NULL) return;
-    conn_unlink(ctx);
-    heap_remove(ctx);
-    if (ctx->mp_temp_path[0]) { unlink(ctx->mp_temp_path); ctx->mp_temp_path[0] = '\0'; }
-    ctx_free(ctx);
-}
-
-/* ================= write ================= */
-
-static void finish_write(write_req_t* wr, int status) {
-    if (wr->free_data && wr->data != NULL) free(wr->data);
-    wr->data = NULL;
-    uv_tcp_t* client = wr->client;
-    int keep_alive = wr->keep_alive;
-    wr_release(wr);
-
-    if (client == NULL || uv_is_closing((uv_handle_t*)client)) return;
-
-    client_ctx_t* ctx = (client_ctx_t*)client->data;
-    if (status != 0 || !keep_alive) {
-        uv_close((uv_handle_t*)client, on_close_c);
-        return;
+    static const char* get_status_color(int status) {
+        if (status >= 200 && status < 300) return COLOR_GREEN;
+        if (status >= 300 && status < 400) return COLOR_CYAN;
+        if (status >= 400 && status < 500) return COLOR_YELLOW;
+        if (status >= 500) return COLOR_RED;
+        return COLOR_RESET;
     }
-    if (ctx != NULL) {
-        ctx->last_active_ms = uv_now(client->loop);
-        heap_update(ctx);
-        buf_reset(&ctx->url);
-        buf_reset(&ctx->headers);
-        buf_reset(&ctx->body);
-        arena_reset(&ctx->arena);
-        ctx->header_state = HEADER_STATE_NONE;
-        ctx->reject_status = 0;
-        ctx->processing = 0;
-        ctx->expect_files = 0;
 
-        if (ctx->mp_parser) { multipart_parser_free(ctx->mp_parser); ctx->mp_parser = NULL; }
-        if (ctx->mp_boundary) { free(ctx->mp_boundary); ctx->mp_boundary = NULL; }
-        ctx->is_multipart = 0;
-        ctx->mp_error = 0;
-        ctx->mp_part_count = 0;
-        ctx->mp_total_size = 0;
-        ctx->mp_last_header = MP_HDR_NONE;
-        if (ctx->mp_current_file) { fclose(ctx->mp_current_file); ctx->mp_current_file = NULL; }
+    static void log_request(const char* method, const char* url, int status, double duration_ms) {
+        const char* mc = get_method_color(method);
+        const char* sc = get_status_color(status);
+        static _Thread_local time_t cached_at = 0;
+        static _Thread_local char time_str[20] = "00:00:00";
+        time_t now = time(NULL);
+        if (now != cached_at) {
+            struct tm tm_info;
+            localtime_r(&now, &tm_info);
+            strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_info);
+            cached_at = now;
+        }
+        printf("[%s] [T%d] %s%s%s %s%s%s %s%d%s %.2fms\n", time_str,
+               current_thread_id, mc, method, COLOR_RESET, COLOR_BOLD,
+               url, COLOR_RESET, sc, status, COLOR_RESET, duration_ms);
+    }
+
+    /* ================= Conn list ================= */
+
+    static _Thread_local client_ctx_t* conn_list = NULL;
+
+    static void conn_link(client_ctx_t* ctx) {
+        ctx->prev = NULL;
+        ctx->next = conn_list;
+        if (conn_list) conn_list->prev = ctx;
+        conn_list = ctx;
+        ctx->linked = 1;
+    }
+
+    static void conn_unlink(client_ctx_t* ctx) {
+        if (!ctx->linked) return;
+        if (ctx->prev) ctx->prev->next = ctx->next;
+        else conn_list = ctx->next;
+        if (ctx->next) ctx->next->prev = ctx->prev;
+        ctx->linked = 0;
+    }
+
+    /* ================= forward ================= */
+
+    static void on_close_c(uv_handle_t* handle);
+    static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
+    static void send_response(uv_tcp_t* client, const char* response, size_t len,
+                              int keep_alive, int owned);
+
+    /* ================= close ================= */
+
+    static void on_close_c(uv_handle_t* handle) {
+        client_ctx_t* ctx = (client_ctx_t*)handle->data;
+        if (ctx == NULL) return;
+        conn_unlink(ctx);
+        heap_remove(ctx);
         if (ctx->mp_temp_path[0]) { unlink(ctx->mp_temp_path); ctx->mp_temp_path[0] = '\0'; }
-        ctx->mp_filename[0] = '\0';
-        ctx->mp_field_name[0] = '\0';
-        ctx->mp_content_type[0] = '\0';
+        ctx_free(ctx);
+    }
 
-        /* 2.1: clear text form fields between keep-alive requests. */
-        mp_form_reset(ctx);
-        buf_reset(&ctx->mp_field_value);
+    /* ================= write ================= */
 
-        /* 2.2: clear file parts between keep-alive requests. */
-        mp_files_reset(ctx);
+    static void finish_write(write_req_t* wr, int status) {
+        if (wr->free_data && wr->data != NULL) free(wr->data);
+        wr->data = NULL;
+        uv_tcp_t* client = wr->client;
+        int keep_alive = wr->keep_alive;
+        wr_release(wr);
 
-        llhttp_init(&ctx->parser, HTTP_REQUEST, &g_settings);
-        ctx->parser.data = ctx;
+        if (client == NULL || uv_is_closing((uv_handle_t*)client)) return;
 
-        if (ctx->pending.len > 0) {
-            char* pdata = ctx->pending.data;
-            size_t plen = ctx->pending.len;
-            ctx->pending.data = NULL;
-            ctx->pending.len = 0;
-            ctx->pending.cap = 0;
-            ctx->pending.arena_backed = 0;
+        client_ctx_t* ctx = (client_ctx_t*)client->data;
+        if (status != 0 || !keep_alive) {
+            uv_close((uv_handle_t*)client, on_close_c);
+            return;
+        }
+        if (ctx != NULL) {
+            ctx->last_active_ms = uv_now(client->loop);
+            heap_update(ctx);
+            buf_reset(&ctx->url);
+            buf_reset(&ctx->headers);
+            buf_reset(&ctx->body);
+            arena_reset(&ctx->arena);
+            ctx->header_state = HEADER_STATE_NONE;
+            ctx->reject_status = 0;
+            ctx->processing = 0;
+            ctx->expect_files = 0;
 
-            enum llhttp_errno err = llhttp_execute(&ctx->parser, pdata, plen);
-            free(pdata);
-            if (err != HPE_OK) {
-                const char* resp = (ctx->reject_status == 415) ? http_415 :
-                (ctx->reject_status == 431) ? http_431 :
-                (ctx->reject_status == 413) ? http_413 : http_400;
-                send_response(&ctx->client, resp, strlen(resp), 0, MOJO_RESP_BORROWED);
-                uv_read_stop((uv_stream_t*)client);
+            if (ctx->mp_parser) { multipart_parser_free(ctx->mp_parser); ctx->mp_parser = NULL; }
+            if (ctx->mp_boundary) { free(ctx->mp_boundary); ctx->mp_boundary = NULL; }
+            ctx->is_multipart = 0;
+            ctx->mp_error = 0;
+            ctx->mp_part_count = 0;
+            ctx->mp_total_size = 0;
+            ctx->mp_last_header = MP_HDR_NONE;
+            if (ctx->mp_current_file) { fclose(ctx->mp_current_file); ctx->mp_current_file = NULL; }
+            if (ctx->mp_temp_path[0]) { unlink(ctx->mp_temp_path); ctx->mp_temp_path[0] = '\0'; }
+            ctx->mp_filename[0] = '\0';
+            ctx->mp_field_name[0] = '\0';
+            ctx->mp_content_type[0] = '\0';
+
+            mp_form_reset(ctx);
+            buf_reset(&ctx->mp_field_value);
+            mp_files_reset(ctx);
+
+            llhttp_init(&ctx->parser, HTTP_REQUEST, &g_settings);
+            ctx->parser.data = ctx;
+
+            if (ctx->pending.len > 0) {
+                char* pdata = ctx->pending.data;
+                size_t plen = ctx->pending.len;
+                ctx->pending.data = NULL;
+                ctx->pending.len = 0;
+                ctx->pending.cap = 0;
+                ctx->pending.arena_backed = 0;
+
+                enum llhttp_errno err = llhttp_execute(&ctx->parser, pdata, plen);
+                free(pdata);
+                if (err != HPE_OK) {
+                    const char* resp = (ctx->reject_status == 415) ? http_415 :
+                    (ctx->reject_status == 431) ? http_431 :
+                    (ctx->reject_status == 413) ? http_413 : http_400;
+                    send_response(&ctx->client, resp, strlen(resp), 0, MOJO_RESP_BORROWED);
+                    uv_read_stop((uv_stream_t*)client);
+                }
             }
         }
     }
+
+    static void on_write_c(uv_write_t* req, int status) {
+        finish_write((write_req_t*)req, status);
+    }
+
+    static void send_response(uv_tcp_t* client, const char* response, size_t len,
+                              int keep_alive, int owned) {
+        if (client == NULL || uv_is_closing((uv_handle_t*)client)) {
+            if (owned == MOJO_RESP_OWNED && response != NULL) free((void*)response);
+            return;
+        }
+        if (response == NULL) {
+            response = http_500; len = strlen(http_500);
+            owned = MOJO_RESP_BORROWED; keep_alive = 0;
+        }
+        write_req_t* wr = wr_acquire();
+        if (!wr) {
+            if (owned == MOJO_RESP_OWNED && response != NULL) free((void*)response);
+            if (!uv_is_closing((uv_handle_t*)client))
+                uv_close((uv_handle_t*)client, on_close_c);
+            return;
+        }
+        wr->client = client;
+        wr->keep_alive = keep_alive;
+        wr->data = (char*)response;
+        wr->len = len;
+        wr->free_data = (owned == MOJO_RESP_OWNED) ? 1 : 0;
+
+        uv_buf_t buf = uv_buf_init(wr->data, (unsigned int)wr->len);
+        int rc = uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_c);
+        if (rc != 0) {
+            if (wr->free_data && wr->data != NULL) free(wr->data);
+            wr_release(wr);
+            if (!uv_is_closing((uv_handle_t*)client))
+                uv_close((uv_handle_t*)client, on_close_c);
+        }
 }
 
-static void on_write_c(uv_write_t* req, int status) {
-    finish_write((write_req_t*)req, status);
-}
-
-static void send_response(uv_tcp_t* client, const char* response, size_t len,
-                            int keep_alive, int owned) {
-    if (client == NULL || uv_is_closing((uv_handle_t*)client)) {
-        if (owned == MOJO_RESP_OWNED && response != NULL) free((void*)response);
-        return;
-    }
-    if (response == NULL) {
-        response = http_500; len = strlen(http_500);
-        owned = MOJO_RESP_BORROWED; keep_alive = 0;
-    }
-    write_req_t* wr = wr_acquire();
-    if (!wr) {
-        if (owned == MOJO_RESP_OWNED && response != NULL) free((void*)response);
-        if (!uv_is_closing((uv_handle_t*)client))
-            uv_close((uv_handle_t*)client, on_close_c);
-        return;
-    }
-    wr->client = client;
-    wr->keep_alive = keep_alive;
-    wr->data = (char*)response;
-    wr->len = len;
-    wr->free_data = (owned == MOJO_RESP_OWNED) ? 1 : 0;
-
-    uv_buf_t buf = uv_buf_init(wr->data, (unsigned int)wr->len);
-    int rc = uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_c);
-    if (rc != 0) {
-        if (wr->free_data && wr->data != NULL) free(wr->data);
-        wr_release(wr);
-        if (!uv_is_closing((uv_handle_t*)client))
-            uv_close((uv_handle_t*)client, on_close_c);
-    }
-}
-
-/* FIX(#4): resp_len-aware; a short/borrowed response must not OOB. */
 static int extract_status_from_response(const char* response, size_t resp_len) {
     if (response == NULL || resp_len < 12) return 500;
     if (response[0] != 'H' || response[1] != 'T' || response[2] != 'T' ||
@@ -791,9 +792,6 @@ static void copy_range(char* dst, size_t dstsz, const char* at, size_t start, si
     dst[n] = '\0';
 }
 
-/* FIX(#1): strip directory components from a client-supplied filename.
-* The file itself is created via mkstemp; this sanitized name is only
-* exposed to application code, but must not be a path-traversal payload. */
 static void sanitize_filename(char* name) {
     if (name == NULL || name[0] == '\0') return;
     char* base = name;
@@ -851,7 +849,6 @@ static int mp_on_part_data_begin(multipart_parser* p) {
     ctx->mp_current_size = 0;
     ctx->mp_current_file = NULL;
     ctx->mp_temp_path[0] = '\0';
-    /* 2.1: reset the text field accumulator for the new part. */
     buf_reset(&ctx->mp_field_value);
     return 0;
 }
@@ -860,7 +857,6 @@ static int mp_on_part_data(multipart_parser* p, const char* at, size_t length) {
     client_ctx_t* ctx = (client_ctx_t*)multipart_parser_get_data(p);
 
     if (ctx->mp_filename[0] != '\0') {
-        /* File part. */
         if (ctx->mp_current_file == NULL) {
             char tmpl[] = "/tmp/mojelly-upload-XXXXXX";
             int fd = mkstemp(tmpl);
@@ -885,7 +881,6 @@ static int mp_on_part_data(multipart_parser* p, const char* at, size_t length) {
         ctx->mp_current_size += length;
         ctx->mp_total_size += length;
     } else {
-        /* 2.1: text field — accumulate into mp_field_value. */
         if (ctx->mp_field_value.len + length > g_max_field_size) {
             ctx->mp_error = 1;
             return -1;
@@ -907,16 +902,14 @@ static int mp_on_part_data_end(multipart_parser* p) {
     client_ctx_t* ctx = (client_ctx_t*)multipart_parser_get_data(p);
 
     if (ctx->mp_current_file != NULL) {
-        /* File part finished. */
         if (fflush(ctx->mp_current_file) != 0) ctx->mp_error = 1;
         if (fclose(ctx->mp_current_file) != 0) ctx->mp_error = 1;
         ctx->mp_current_file = NULL;
         ctx->mp_part_count++;
 
-        /* 2.2: save the FilePart into mp_files[]. */
         if (!ctx->mp_error && ctx->mp_filename[0] != '\0') {
-            if (ctx->mp_file_count >= g_max_parts) {
-                ctx->mp_error = 1;   /* too many parts */
+            if (ctx->mp_file_count >= g_max_parts || ctx->mp_file_count >= 100) {
+                ctx->mp_error = 1;
             } else {
                 mp_file_part_t* f = &ctx->mp_files[ctx->mp_file_count];
                 strncpy(f->name, ctx->mp_field_name, sizeof(f->name) - 1);
@@ -929,16 +922,13 @@ static int mp_on_part_data_end(multipart_parser* p) {
                 f->path[sizeof(f->path) - 1] = '\0';
                 f->size = ctx->mp_current_size;
                 ctx->mp_file_count++;
-                /* mp_temp_path is now owned by mp_files[]; clear the slot
-                * so that ctx_free does not unlink it twice. */
                 ctx->mp_temp_path[0] = '\0';
             }
         }
     } else {
-        /* 2.1: text field finished — store (name, value) if under limits. */
         if (ctx->mp_field_name[0] != '\0' && !ctx->mp_error) {
-            if (ctx->mp_form_count >= g_max_parts) {
-                ctx->mp_error = 1;   /* too many parts */
+            if (ctx->mp_form_count >= g_max_parts || ctx->mp_form_count >= 100) {
+                ctx->mp_error = 1;
             } else {
                 mp_form_field_t* f = &ctx->mp_form[ctx->mp_form_count];
                 strncpy(f->name, ctx->mp_field_name, sizeof(f->name) - 1);
@@ -1057,7 +1047,7 @@ static int on_header_value_c(llhttp_t* parser, const char* at, size_t length) {
 
 static const char* find_content_type(const char* headers, size_t len) {
     static const char needle[] = "Content-Type:";
-    const size_t nlen = sizeof(needle) - 1; /* 13 */
+    const size_t nlen = sizeof(needle) - 1;
     for (size_t i = 0; i + nlen <= len; i++) {
         if (i != 0) {
             if (!(i >= 2 && headers[i - 2] == '\r' && headers[i - 1] == '\n')) {
@@ -1158,58 +1148,6 @@ static int on_body_c(llhttp_t* parser, const char* at, size_t length) {
     return buf_append_arena(&ctx->body, &ctx->arena, at, length);
 }
 
-
-/* 2.3: serialize ctx->mp_form and ctx->mp_files to a JSON string.
- * Caller frees with free(). Returns NULL if no multipart data. */
-static char* mp_serialize_json(client_ctx_t* ctx, size_t* out_len) {
-    if (ctx->mp_form_count == 0 && ctx->mp_file_count == 0) {
-        *out_len = 0;
-        return NULL;
-    }
-    /* Estimate: 64 bytes per field/file + name/value lengths. */
-    size_t cap = 256;
-    for (int i = 0; i < ctx->mp_form_count; i++) {
-        cap += 64 + strlen(ctx->mp_form[i].name) + ctx->mp_form[i].value_len;
-    }
-    for (int i = 0; i < ctx->mp_file_count; i++) {
-        cap += 128 + strlen(ctx->mp_files[i].name) + strlen(ctx->mp_files[i].filename) +
-        strlen(ctx->mp_files[i].content_type) + strlen(ctx->mp_files[i].path);
-    }
-    char* buf = (char*)malloc(cap);
-    if (!buf) { *out_len = 0; return NULL; }
-    size_t pos = 0;
-    pos += (size_t)snprintf(buf + pos, cap - pos, "{\"form\":{");
-    for (int i = 0; i < ctx->mp_form_count; i++) {
-        if (i > 0) buf[pos++] = ',';
-        pos += (size_t)snprintf(buf + pos, cap - pos, "\"%s\":\"", ctx->mp_form[i].name);
-        /* JSON-escape value (minimal: ", \, control chars). */
-        for (size_t k = 0; k < ctx->mp_form[i].value_len; k++) {
-            unsigned char c = (unsigned char)ctx->mp_form[i].value[k];
-            if (c == '"') { buf[pos++] = '\\'; buf[pos++] = '"'; }
-            else if (c == '\\') { buf[pos++] = '\\'; buf[pos++] = '\\'; }
-            else if (c == '\n') { buf[pos++] = '\\'; buf[pos++] = 'n'; }
-            else if (c == '\r') { buf[pos++] = '\\'; buf[pos++] = 'r'; }
-            else if (c == '\t') { buf[pos++] = '\\'; buf[pos++] = 't'; }
-            else if (c < 0x20) { pos += (size_t)snprintf(buf + pos, cap - pos, "\\u%04x", c); }
-            else buf[pos++] = (char)c;
-        }
-        buf[pos++] = '"';
-    }
-    pos += (size_t)snprintf(buf + pos, cap - pos, "},\"files\":[");
-    for (int i = 0; i < ctx->mp_file_count; i++) {
-        if (i > 0) buf[pos++] = ',';
-        pos += (size_t)snprintf(buf + pos, cap - pos,
-                                "{\"name\":\"%s\",\"filename\":\"%s\",\"content_type\":\"%s\",\"path\":\"%s\",\"size\":%zu}",
-                                ctx->mp_files[i].name, ctx->mp_files[i].filename,
-                                ctx->mp_files[i].content_type, ctx->mp_files[i].path,
-                                ctx->mp_files[i].size);
-    }
-    pos += (size_t)snprintf(buf + pos, cap - pos, "]}");
-    buf[pos] = '\0';
-    *out_len = pos;
-    return buf;
-}
-
 static int on_message_complete_c(llhttp_t* parser) {
     client_ctx_t* ctx = (client_ctx_t*)parser->data;
 
@@ -1229,44 +1167,51 @@ static int on_message_complete_c(llhttp_t* parser) {
     const char* headers = ctx->headers.data ? ctx->headers.data : "";
     const char* body = ctx->body.data ? ctx->body.data : "";
 
+    /* 2.3: build FFI arrays for multipart data (on the stack). */
+    c_form_field_t form_arr[100];
+    for (int i = 0; i < ctx->mp_form_count; i++) {
+        form_arr[i].name = ctx->mp_form[i].name;
+        form_arr[i].value = ctx->mp_form[i].value;
+        form_arr[i].value_len = ctx->mp_form[i].value_len;
+    }
+    c_file_part_t file_arr[100];
+    for (int i = 0; i < ctx->mp_file_count; i++) {
+        file_arr[i].name = ctx->mp_files[i].name;
+        file_arr[i].filename = ctx->mp_files[i].filename;
+        file_arr[i].content_type = ctx->mp_files[i].content_type;
+        file_arr[i].path = ctx->mp_files[i].path;
+        file_arr[i].size = ctx->mp_files[i].size;
+    }
+
     struct timespec start, end;
     int log_on = g_log_level >= 1;
     if (log_on) clock_gettime(CLOCK_MONOTONIC, &start);
 
     size_t resp_len = 0;
     int resp_owned = MOJO_RESP_OWNED;
-    /* 2.3: serialize multipart form/files to JSON and pass to Mojo. */
-    size_t mp_json_len = 0;
-    char* mp_json = NULL;
-    if (ctx->is_multipart && !ctx->mp_error) {
-        mp_json = mp_serialize_json(ctx, &mp_json_len);
-    }
     char* response = mojo_handler(router, url, method, headers, body, &resp_len,
-                                  &resp_owned, ctx->url.len, ctx->headers.len, ctx->body.len,
-                                  mp_json, mp_json_len);
-    if (mp_json) {
-        fprintf(stderr, "[DBG] mp_json: %.*s\n", (int)mp_json_len, mp_json);
-    }
-    if (mp_json) free(mp_json);
+        &resp_owned, ctx->url.len, ctx->headers.len, ctx->body.len,
+        form_arr, (size_t)ctx->mp_form_count,
+            file_arr, (size_t)ctx->mp_file_count);
 
-    double duration_ms = 0;
-    if (log_on) {
-        clock_gettime(CLOCK_MONOTONIC, &end);
-        duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
-        (end.tv_nsec - start.tv_nsec) / 1000000.0;
-    }
+        double duration_ms = 0;
+        if (log_on) {
+            clock_gettime(CLOCK_MONOTONIC, &end);
+            duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
+            (end.tv_nsec - start.tv_nsec) / 1000000.0;
+        }
 
-    int status = 500;
-    int keep_alive = ctx->keep_alive;
-    if (response != NULL) {
-        if (resp_len == 0) resp_len = strlen(response);
-        status = extract_status_from_response(response, resp_len);
-        send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
-    } else {
-        send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
-    }
-    if (log_on) log_request(method, url, status, duration_ms);
-    return 0;
+        int status = 500;
+        int keep_alive = ctx->keep_alive;
+        if (response != NULL) {
+            if (resp_len == 0) resp_len = strlen(response);
+            status = extract_status_from_response(response, resp_len);
+            send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
+        } else {
+            send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
+        }
+        if (log_on) log_request(method, url, status, duration_ms);
+        return 0;
 }
 
 /* ================= read ================= */
@@ -1403,14 +1348,11 @@ static void on_connection_c(uv_stream_t* server, int status) {
     buf_init(&ctx->headers); ctx->headers.arena_backed = 1;
     buf_init(&ctx->body); ctx->body.arena_backed = 1;
     buf_init(&ctx->pending); ctx->pending.arena_backed = 1;
-    /* 2.1: text field accumulator is heap-backed (small, per-request). */
     ctx->mp_field_value.data = NULL;
     ctx->mp_field_value.len = 0;
     ctx->mp_field_value.cap = 0;
     ctx->mp_field_value.arena_backed = 0;
     ctx->mp_form_count = 0;
-
-    /* 2.2: reset file parts. */
     ctx->mp_file_count = 0;
 
     ctx->header_state = HEADER_STATE_NONE;

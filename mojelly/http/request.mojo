@@ -73,11 +73,7 @@ def _equal_ignore_case(a: String, b: String) -> Bool:
     return True
 
 
-# MULTIPART: a single uploaded file part.
-# `filename` is already sanitized by the C layer (basename, no "..", no "/").
-# `path` points to a temp file in /tmp that the C layer will NOT unlink
-# automatically once the request is handed off to Mojo.
-struct FilePart:
+struct FilePart(Copyable, Movable):
     var name: String
     var filename: String
     var content_type: String
@@ -99,10 +95,9 @@ struct FilePart:
         self.path = path^
 
 
-# MULTIPART: everything a multipart/form-data request carries.
-struct MultipartData:
-    var form: Dict[String, String]   # text fields (name -> value)
-    var files: List[FilePart]        # file parts (in order of appearance)
+struct MultipartData(Copyable, Movable):
+    var form: Dict[String, String]
+    var files: List[FilePart]
 
     def __init__(out self):
         self.form = Dict[String, String]()

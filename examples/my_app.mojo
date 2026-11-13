@@ -7,10 +7,29 @@ from test_handlers import dto_validation_test, user_handler
 
 
 # Multipart upload test handler.
-# At this stage (C-side streaming), the file is already on disk in /tmp.
-# Mojo doesn't yet know about FilePart, so we just report that streaming works.
 def upload_handler(mut req: HTTPRequest) -> HTTPResponse:
-    return HTTPResponse(200, "Multipart received (streaming to /tmp)")
+    var body = (
+        "form_count="
+        + String(req.form_count())
+        + ", file_count="
+        + String(req.file_count())
+        + "\n"
+    )
+    if req.has_form("username"):
+        body += "username=" + req.get_form("username") + "\n"
+    if req.has_form("age"):
+        body += "age=" + req.get_form("age") + "\n"
+    for f in req.get_files():
+        body += (
+            "file: "
+            + f.filename
+            + " ("
+            + String(f.size)
+            + " bytes, "
+            + f.content_type
+            + ")\n"
+        )
+    return HTTPResponse(200, body)
 
 
 # Hello world plain text response
