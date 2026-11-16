@@ -73,37 +73,6 @@ def _equal_ignore_case(a: String, b: String) -> Bool:
     return True
 
 
-struct FilePart(Copyable, Movable):
-    var name: String
-    var filename: String
-    var content_type: String
-    var size: Int
-    var path: String
-
-    def __init__(
-        out self,
-        var name: String = "",
-        var filename: String = "",
-        var content_type: String = "",
-        size: Int = 0,
-        var path: String = "",
-    ):
-        self.name = name^
-        self.filename = filename^
-        self.content_type = content_type^
-        self.size = size
-        self.path = path^
-
-
-struct MultipartData(Copyable, Movable):
-    var form: Dict[String, String]
-    var files: List[FilePart]
-
-    def __init__(out self):
-        self.form = Dict[String, String]()
-        self.files = List[FilePart]()
-
-
 struct HTTPRequest:
     var url: String
     var path: String
@@ -117,10 +86,6 @@ struct HTTPRequest:
     var _cookies_cache: Optional[Dict[String, String]]
     var query: QueryParams
     var params: Dict[String, String]
-
-    # MULTIPART: None for non-multipart requests (the common case).
-    # Only allocated when the C layer actually parsed a multipart body.
-    var multipart: Optional[MultipartData]
 
     def __init__(
         out self,
@@ -146,14 +111,13 @@ struct HTTPRequest:
             self.path = path
             self.query_string = query_string
 
-        self.query = QueryParams(self.query_string.copy())
+        self.query = QueryParams(self.query_string^)
         self.method = method
         self.body = ""
         self._headers_raw = headers_raw
         self._headers_cache = None
         self._cookies_cache = None
         self.params = Dict[String, String]()
-        self.multipart = None
 
     # ---- Headers (lazy) ----
 
@@ -231,42 +195,3 @@ struct HTTPRequest:
 
     def has_param(self, name: String) -> Bool:
         return name in self.params
-
-    # ---- Multipart (populated by the C layer for multipart/form-data) ----
-
-    def has_multipart(self) -> Bool:
-        return self.multipart is not None
-
-    def get_form(self, name: String, default: String = "") -> String:
-        if not self.multipart:
-            return default
-        return self.multipart.value().form.get(name, default)
-
-    def has_form(self, name: String) -> Bool:
-        if not self.multipart:
-            return False
-        return name in self.multipart.value().form
-
-    def get_file(self, name: String) -> Optional[FilePart]:
-        if not self.multipart:
-            return None
-        ref files = self.multipart.value().files
-        for i in range(len(files)):
-            if files[i].name == name:
-                return files[i].copy()
-        return None
-
-    def get_files(self) -> List[FilePart]:
-        if not self.multipart:
-            return List[FilePart]()
-        return self.multipart.value().files.copy()
-
-    def file_count(self) -> Int:
-        if not self.multipart:
-            return 0
-        return len(self.multipart.value().files)
-
-    def form_count(self) -> Int:
-        if not self.multipart:
-            return 0
-        return len(self.multipart.value().form)
