@@ -6,7 +6,7 @@ from test_html_page import test_html_page, test_css
 from test_handlers import dto_validation_test, user_handler
 
 
-# Multipart upload test handler.
+# Multipart upload test handler (machine-readable output for E2E tests).
 def upload_handler(mut req: HTTPRequest) -> HTTPResponse:
     var body = (
         "form_count="
@@ -15,19 +15,20 @@ def upload_handler(mut req: HTTPRequest) -> HTTPResponse:
         + String(req.file_count())
         + "\n"
     )
-    if req.has_form("username"):
-        body += "username=" + req.get_form("username") + "\n"
-    if req.has_form("age"):
-        body += "age=" + req.get_form("age") + "\n"
+    if req.multipart:
+        for key in req.multipart.value().form.keys():
+            body += "form[" + key + "]=" + req.get_form(key) + "\n"
     for f in req.get_files():
         body += (
-            "file: "
+            "file[name="
+            + f.name
+            + ",filename="
             + f.filename
-            + " ("
+            + ",size="
             + String(f.size)
-            + " bytes, "
+            + ",content_type="
             + f.content_type
-            + ")\n"
+            + "]\n"
         )
     return HTTPResponse(200, body)
 

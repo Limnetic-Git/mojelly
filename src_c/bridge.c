@@ -868,12 +868,15 @@ static int mp_on_part_data(multipart_parser* p, const char* at, size_t length) {
             strncpy(ctx->mp_temp_path, tmpl, sizeof(ctx->mp_temp_path) - 1);
             ctx->mp_temp_path[sizeof(ctx->mp_temp_path) - 1] = '\0';
         }
-        if (ctx->mp_current_size + length > g_max_file_size) {
-            ctx->mp_error = 1;
-            return -1;
-        }
+        /* Payload too large: total body first, then per-file. */
         if (ctx->mp_total_size + length > g_max_body_size) {
             ctx->mp_error = 1;
+            ctx->reject_status = 413;
+            return -1;
+        }
+        if (ctx->mp_current_size + length > g_max_file_size) {
+            ctx->mp_error = 1;
+            ctx->reject_status = 413;
             return -1;
         }
         size_t written = fwrite(at, 1, length, ctx->mp_current_file);
@@ -892,6 +895,7 @@ static int mp_on_part_data(multipart_parser* p, const char* at, size_t length) {
         ctx->mp_total_size += length;
         if (ctx->mp_total_size > g_max_body_size) {
             ctx->mp_error = 1;
+            ctx->reject_status = 413;
             return -1;
         }
     }
@@ -1135,7 +1139,9 @@ static int on_body_c(llhttp_t* parser, const char* at, size_t length) {
         size_t parsed = multipart_parser_execute(ctx->mp_parser, at, length);
         if (parsed != length) {
             ctx->mp_error = 1;
-            ctx->reject_status = 400;
+            if (ctx->reject_status == 0) {
+                ctx->reject_status = 400;
+            }
             return -1;
         }
         return 0;

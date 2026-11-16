@@ -93,6 +93,15 @@ else
     FAILED_TESTS=$((FAILED_TESTS + 1))
 fi
 
+echo -e "${BLUE}--- Multipart Integration Suite ---${NC}"
+_kill_server
+if python3 tests/test_multipart_e2e.py; then
+    echo -e "${GREEN}✔ Multipart Suite passed${NC}\n"
+else
+    echo -e "${RED}✘ Multipart Suite failed${NC}\n"
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+
 echo -e "${BLUE}=========================================="
 if [ $FAILED_TESTS -eq 0 ]; then
     echo -e "${GREEN}🎉 All test suites passed successfully! (100% Coverage)${NC}"
