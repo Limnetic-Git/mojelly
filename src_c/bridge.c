@@ -280,6 +280,30 @@ typedef struct {
     size_t size;
 } mp_file_part_t;
 
+/* Все multipart-поля в одной структуре.
+ * Аллоцируется только когда запрос реально multipart. */
+typedef struct {
+    multipart_parser* parser;
+    char* boundary;
+    mp_header_t last_header;
+    char field_name[256];
+    char filename[256];
+    char content_type[128];
+    char temp_path[256];
+    FILE* current_file;
+    size_t current_size;
+    size_t total_size;
+    int part_count;
+    int error;
+
+    buffer_t field_value;
+    mp_form_field_t form[100];
+    int form_count;
+
+    mp_file_part_t files[100];
+    int file_count;
+} multipart_state_t;
+
 typedef struct client_ctx {
     uv_tcp_t client;
     llhttp_t parser;
@@ -303,32 +327,61 @@ typedef struct client_ctx {
     int heap_index;
 
     int expect_files;
-
     int is_multipart;
-    multipart_parser* mp_parser;
-    char* mp_boundary;
-    mp_header_t mp_last_header;
-    char mp_field_name[256];
-    char mp_filename[256];
-    char mp_content_type[128];
-    char mp_temp_path[256];
-    FILE* mp_current_file;
-    size_t mp_current_size;
-    size_t mp_total_size;
-    int mp_part_count;
-    int mp_error;
 
-    buffer_t mp_field_value;
-    mp_form_field_t mp_form[100];
-    int mp_form_count;
-
-    mp_file_part_t mp_files[100];
-    int mp_file_count;
+    multipart_state_t* mp;   /* NULL для non-multipart */
 } client_ctx_t;
 
 static client_ctx_t* g_ctx_slab[CTX_SLAB_MAX];
 static int g_ctx_slab_len = 0;
 static pthread_mutex_t g_ctx_slab_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static multipart_state_t* mp_state_alloc(void) {
+    multipart_state_t* mp = (multipart_state_t*)calloc(1, sizeof(multipart_state_t));
+    if (mp != NULL) {
+        buf_init(&mp->field_value);
+        mp->last_header = MP_HDR_NONE;
+    }
+    return mp;
+}
+
+static void mp_form_reset(multipart_state_t* mp) {
+    for (int i = 0; i < mp->form_count; i++) {
+        if (mp->form[i].value) {
+            free(mp->form[i].value);
+            mp->form[i].value = NULL;
+        }
+        mp->form[i].value_len = 0;
+        mp->form[i].name[0] = '\0';
+    }
+    mp->form_count = 0;
+}
+
+static void mp_files_reset(multipart_state_t* mp) {
+    for (int i = 0; i < mp->file_count; i++) {
+        if (mp->files[i].path[0]) {
+            unlink(mp->files[i].path);
+        }
+        mp->files[i].path[0] = '\0';
+        mp->files[i].filename[0] = '\0';
+        mp->files[i].name[0] = '\0';
+        mp->files[i].content_type[0] = '\0';
+        mp->files[i].size = 0;
+    }
+    mp->file_count = 0;
+}
+
+static void mp_state_free(multipart_state_t* mp) {
+    if (mp == NULL) return;
+    if (mp->parser) { multipart_parser_free(mp->parser); mp->parser = NULL; }
+    if (mp->boundary) { free(mp->boundary); mp->boundary = NULL; }
+    if (mp->current_file) { fclose(mp->current_file); mp->current_file = NULL; }
+    if (mp->temp_path[0]) { unlink(mp->temp_path); mp->temp_path[0] = '\0'; }
+    mp_form_reset(mp);
+    buf_free(&mp->field_value);
+    mp_files_reset(mp);
+    free(mp);
+}
 
 static client_ctx_t* ctx_alloc(void) {
     pthread_mutex_lock(&g_ctx_slab_mutex);
@@ -338,7 +391,6 @@ static client_ctx_t* ctx_alloc(void) {
         memset(c, 0, sizeof(client_ctx_t));
         c->in_slab = 1;
         c->heap_index = -1;
-        buf_init(&c->mp_field_value);
         return c;
     }
     pthread_mutex_unlock(&g_ctx_slab_mutex);
@@ -346,46 +398,14 @@ static client_ctx_t* ctx_alloc(void) {
     if (c) {
         c->in_slab = 0;
         c->heap_index = -1;
-        buf_init(&c->mp_field_value);
     }
     return c;
 }
 
-static void mp_form_reset(client_ctx_t* c) {
-    for (int i = 0; i < c->mp_form_count; i++) {
-        if (c->mp_form[i].value) {
-            free(c->mp_form[i].value);
-            c->mp_form[i].value = NULL;
-        }
-        c->mp_form[i].value_len = 0;
-        c->mp_form[i].name[0] = '\0';
-    }
-    c->mp_form_count = 0;
-}
-
-static void mp_files_reset(client_ctx_t* c) {
-    for (int i = 0; i < c->mp_file_count; i++) {
-        if (c->mp_files[i].path[0]) {
-            unlink(c->mp_files[i].path);
-        }
-        c->mp_files[i].path[0] = '\0';
-        c->mp_files[i].filename[0] = '\0';
-        c->mp_files[i].name[0] = '\0';
-        c->mp_files[i].content_type[0] = '\0';
-        c->mp_files[i].size = 0;
-    }
-    c->mp_file_count = 0;
-}
-
 static void ctx_free(client_ctx_t* c) {
     if (!c) return;
-    if (c->mp_parser) { multipart_parser_free(c->mp_parser); c->mp_parser = NULL; }
-    if (c->mp_boundary) { free(c->mp_boundary); c->mp_boundary = NULL; }
-    if (c->mp_current_file) { fclose(c->mp_current_file); c->mp_current_file = NULL; }
-    if (c->mp_temp_path[0]) { unlink(c->mp_temp_path); c->mp_temp_path[0] = '\0'; }
-    mp_form_reset(c);
-    buf_free(&c->mp_field_value);
-    mp_files_reset(c);
+    mp_state_free(c->mp);
+    c->mp = NULL;
     arena_free(&c->arena);
     buf_free(&c->url);
     buf_free(&c->headers);
@@ -639,7 +659,6 @@ static const char* http_500 =
         if (ctx == NULL) return;
         conn_unlink(ctx);
         heap_remove(ctx);
-        if (ctx->mp_temp_path[0]) { unlink(ctx->mp_temp_path); ctx->mp_temp_path[0] = '\0'; }
         ctx_free(ctx);
     }
 
@@ -670,23 +689,12 @@ static const char* http_500 =
             ctx->reject_status = 0;
             ctx->processing = 0;
             ctx->expect_files = 0;
-
-            if (ctx->mp_parser) { multipart_parser_free(ctx->mp_parser); ctx->mp_parser = NULL; }
-            if (ctx->mp_boundary) { free(ctx->mp_boundary); ctx->mp_boundary = NULL; }
             ctx->is_multipart = 0;
-            ctx->mp_error = 0;
-            ctx->mp_part_count = 0;
-            ctx->mp_total_size = 0;
-            ctx->mp_last_header = MP_HDR_NONE;
-            if (ctx->mp_current_file) { fclose(ctx->mp_current_file); ctx->mp_current_file = NULL; }
-            if (ctx->mp_temp_path[0]) { unlink(ctx->mp_temp_path); ctx->mp_temp_path[0] = '\0'; }
-            ctx->mp_filename[0] = '\0';
-            ctx->mp_field_name[0] = '\0';
-            ctx->mp_content_type[0] = '\0';
 
-            mp_form_reset(ctx);
-            buf_reset(&ctx->mp_field_value);
-            mp_files_reset(ctx);
+            /* Освобождаем multipart-состояние целиком — при следующем
+             * keep-alive запросе оно будет создано заново при необходимости. */
+            mp_state_free(ctx->mp);
+            ctx->mp = NULL;
 
             llhttp_init(&ctx->parser, HTTP_REQUEST, &g_settings);
             ctx->parser.data = ctx;
@@ -809,92 +817,100 @@ static void sanitize_filename(char* name) {
 
 static int mp_on_header_field(multipart_parser* p, const char* at, size_t length) {
     client_ctx_t* ctx = (client_ctx_t*)multipart_parser_get_data(p);
+    multipart_state_t* mp = ctx->mp;
+    if (mp == NULL) return -1;
     if (length >= 19 && strncasecmp(at, "Content-Disposition", 19) == 0) {
-        ctx->mp_last_header = MP_HDR_CONTENT_DISPOSITION;
+        mp->last_header = MP_HDR_CONTENT_DISPOSITION;
     } else if (length >= 12 && strncasecmp(at, "Content-Type", 12) == 0) {
-        ctx->mp_last_header = MP_HDR_CONTENT_TYPE;
+        mp->last_header = MP_HDR_CONTENT_TYPE;
     } else {
-        ctx->mp_last_header = MP_HDR_OTHER;
+        mp->last_header = MP_HDR_OTHER;
     }
     return 0;
 }
 
 static int mp_on_header_value(multipart_parser* p, const char* at, size_t length) {
     client_ctx_t* ctx = (client_ctx_t*)multipart_parser_get_data(p);
+    multipart_state_t* mp = ctx->mp;
+    if (mp == NULL) return -1;
 
-    if (ctx->mp_last_header == MP_HDR_CONTENT_DISPOSITION) {
+    if (mp->last_header == MP_HDR_CONTENT_DISPOSITION) {
         const char* name_p = find_ci(at, length, "name=\"");
         if (name_p != NULL) {
             size_t off = (size_t)(name_p - at) + 6;
             size_t end = off;
             while (end < length && at[end] != '"') end++;
-            copy_range(ctx->mp_field_name, sizeof(ctx->mp_field_name), at, off, end);
+            copy_range(mp->field_name, sizeof(mp->field_name), at, off, end);
         }
         const char* fname_p = find_ci(at, length, "filename=\"");
         if (fname_p != NULL) {
             size_t off = (size_t)(fname_p - at) + 10;
             size_t end = off;
             while (end < length && at[end] != '"') end++;
-            copy_range(ctx->mp_filename, sizeof(ctx->mp_filename), at, off, end);
-            sanitize_filename(ctx->mp_filename);
+            copy_range(mp->filename, sizeof(mp->filename), at, off, end);
+            sanitize_filename(mp->filename);
         }
-    } else if (ctx->mp_last_header == MP_HDR_CONTENT_TYPE) {
-        safe_copy(ctx->mp_content_type, sizeof(ctx->mp_content_type), at, length);
+    } else if (mp->last_header == MP_HDR_CONTENT_TYPE) {
+        safe_copy(mp->content_type, sizeof(mp->content_type), at, length);
     }
     return 0;
 }
 
 static int mp_on_part_data_begin(multipart_parser* p) {
     client_ctx_t* ctx = (client_ctx_t*)multipart_parser_get_data(p);
-    ctx->mp_current_size = 0;
-    ctx->mp_current_file = NULL;
-    ctx->mp_temp_path[0] = '\0';
-    buf_reset(&ctx->mp_field_value);
+    multipart_state_t* mp = ctx->mp;
+    if (mp == NULL) return -1;
+    mp->current_size = 0;
+    mp->current_file = NULL;
+    mp->temp_path[0] = '\0';
+    buf_reset(&mp->field_value);
     return 0;
 }
 
 static int mp_on_part_data(multipart_parser* p, const char* at, size_t length) {
     client_ctx_t* ctx = (client_ctx_t*)multipart_parser_get_data(p);
+    multipart_state_t* mp = ctx->mp;
+    if (mp == NULL) return -1;
 
-    if (ctx->mp_filename[0] != '\0') {
-        if (ctx->mp_current_file == NULL) {
+    if (mp->filename[0] != '\0') {
+        if (mp->current_file == NULL) {
             char tmpl[] = "/tmp/mojelly-upload-XXXXXX";
             int fd = mkstemp(tmpl);
-            if (fd < 0) { ctx->mp_error = 1; return -1; }
-            ctx->mp_current_file = fdopen(fd, "wb");
-            if (!ctx->mp_current_file) {
-                close(fd); unlink(tmpl); ctx->mp_error = 1; return -1;
+            if (fd < 0) { mp->error = 1; return -1; }
+            mp->current_file = fdopen(fd, "wb");
+            if (!mp->current_file) {
+                close(fd); unlink(tmpl); mp->error = 1; return -1;
             }
-            strncpy(ctx->mp_temp_path, tmpl, sizeof(ctx->mp_temp_path) - 1);
-            ctx->mp_temp_path[sizeof(ctx->mp_temp_path) - 1] = '\0';
+            strncpy(mp->temp_path, tmpl, sizeof(mp->temp_path) - 1);
+            mp->temp_path[sizeof(mp->temp_path) - 1] = '\0';
         }
         /* Payload too large: total body first, then per-file. */
-        if (ctx->mp_total_size + length > g_max_body_size) {
-            ctx->mp_error = 1;
+        if (mp->total_size + length > g_max_body_size) {
+            mp->error = 1;
             ctx->reject_status = 413;
             return -1;
         }
-        if (ctx->mp_current_size + length > g_max_file_size) {
-            ctx->mp_error = 1;
+        if (mp->current_size + length > g_max_file_size) {
+            mp->error = 1;
             ctx->reject_status = 413;
             return -1;
         }
-        size_t written = fwrite(at, 1, length, ctx->mp_current_file);
-        if (written != length) { ctx->mp_error = 1; return -1; }
-        ctx->mp_current_size += length;
-        ctx->mp_total_size += length;
+        size_t written = fwrite(at, 1, length, mp->current_file);
+        if (written != length) { mp->error = 1; return -1; }
+        mp->current_size += length;
+        mp->total_size += length;
     } else {
-        if (ctx->mp_field_value.len + length > g_max_field_size) {
-            ctx->mp_error = 1;
+        if (mp->field_value.len + length > g_max_field_size) {
+            mp->error = 1;
             return -1;
         }
-        if (buf_append_arena(&ctx->mp_field_value, &ctx->arena, at, length) != 0) {
-            ctx->mp_error = 1;
+        if (buf_append_arena(&mp->field_value, &ctx->arena, at, length) != 0) {
+            mp->error = 1;
             return -1;
         }
-        ctx->mp_total_size += length;
-        if (ctx->mp_total_size > g_max_body_size) {
-            ctx->mp_error = 1;
+        mp->total_size += length;
+        if (mp->total_size > g_max_body_size) {
+            mp->error = 1;
             ctx->reject_status = 413;
             return -1;
         }
@@ -904,62 +920,64 @@ static int mp_on_part_data(multipart_parser* p, const char* at, size_t length) {
 
 static int mp_on_part_data_end(multipart_parser* p) {
     client_ctx_t* ctx = (client_ctx_t*)multipart_parser_get_data(p);
+    multipart_state_t* mp = ctx->mp;
+    if (mp == NULL) return -1;
 
-    if (ctx->mp_current_file != NULL) {
-        if (fflush(ctx->mp_current_file) != 0) ctx->mp_error = 1;
-        if (fclose(ctx->mp_current_file) != 0) ctx->mp_error = 1;
-        ctx->mp_current_file = NULL;
-        ctx->mp_part_count++;
+    if (mp->current_file != NULL) {
+        if (fflush(mp->current_file) != 0) mp->error = 1;
+        if (fclose(mp->current_file) != 0) mp->error = 1;
+        mp->current_file = NULL;
+        mp->part_count++;
 
-        if (!ctx->mp_error && ctx->mp_filename[0] != '\0') {
-            if (ctx->mp_file_count >= g_max_parts || ctx->mp_file_count >= 100) {
-                ctx->mp_error = 1;
+        if (!mp->error && mp->filename[0] != '\0') {
+            if (mp->file_count >= g_max_parts || mp->file_count >= 100) {
+                mp->error = 1;
             } else {
-                mp_file_part_t* f = &ctx->mp_files[ctx->mp_file_count];
-                strncpy(f->name, ctx->mp_field_name, sizeof(f->name) - 1);
+                mp_file_part_t* f = &mp->files[mp->file_count];
+                strncpy(f->name, mp->field_name, sizeof(f->name) - 1);
                 f->name[sizeof(f->name) - 1] = '\0';
-                strncpy(f->filename, ctx->mp_filename, sizeof(f->filename) - 1);
+                strncpy(f->filename, mp->filename, sizeof(f->filename) - 1);
                 f->filename[sizeof(f->filename) - 1] = '\0';
-                strncpy(f->content_type, ctx->mp_content_type, sizeof(f->content_type) - 1);
+                strncpy(f->content_type, mp->content_type, sizeof(f->content_type) - 1);
                 f->content_type[sizeof(f->content_type) - 1] = '\0';
-                strncpy(f->path, ctx->mp_temp_path, sizeof(f->path) - 1);
+                strncpy(f->path, mp->temp_path, sizeof(f->path) - 1);
                 f->path[sizeof(f->path) - 1] = '\0';
-                f->size = ctx->mp_current_size;
-                ctx->mp_file_count++;
-                ctx->mp_temp_path[0] = '\0';
+                f->size = mp->current_size;
+                mp->file_count++;
+                mp->temp_path[0] = '\0';
             }
         }
     } else {
-        if (ctx->mp_field_name[0] != '\0' && !ctx->mp_error) {
-            if (ctx->mp_form_count >= g_max_parts || ctx->mp_form_count >= 100) {
-                ctx->mp_error = 1;
+        if (mp->field_name[0] != '\0' && !mp->error) {
+            if (mp->form_count >= g_max_parts || mp->form_count >= 100) {
+                mp->error = 1;
             } else {
-                mp_form_field_t* f = &ctx->mp_form[ctx->mp_form_count];
-                strncpy(f->name, ctx->mp_field_name, sizeof(f->name) - 1);
+                mp_form_field_t* f = &mp->form[mp->form_count];
+                strncpy(f->name, mp->field_name, sizeof(f->name) - 1);
                 f->name[sizeof(f->name) - 1] = '\0';
-                f->value_len = ctx->mp_field_value.len;
+                f->value_len = mp->field_value.len;
                 if (f->value_len > 0) {
                     f->value = (char*)malloc(f->value_len + 1);
                     if (f->value == NULL) {
-                        ctx->mp_error = 1;
+                        mp->error = 1;
                     } else {
-                        memcpy(f->value, ctx->mp_field_value.data, f->value_len);
+                        memcpy(f->value, mp->field_value.data, f->value_len);
                         f->value[f->value_len] = '\0';
-                        ctx->mp_form_count++;
+                        mp->form_count++;
                     }
                 } else {
                     f->value = NULL;
-                    ctx->mp_form_count++;
+                    mp->form_count++;
                 }
             }
         }
-        buf_reset(&ctx->mp_field_value);
+        buf_reset(&mp->field_value);
     }
 
-    ctx->mp_filename[0] = '\0';
-    ctx->mp_field_name[0] = '\0';
-    ctx->mp_content_type[0] = '\0';
-    ctx->mp_last_header = MP_HDR_NONE;
+    mp->filename[0] = '\0';
+    mp->field_name[0] = '\0';
+    mp->content_type[0] = '\0';
+    mp->last_header = MP_HDR_NONE;
     return 0;
 }
 
@@ -1090,19 +1108,23 @@ static int on_headers_complete_c(llhttp_t* parser) {
             return -1;
         }
         ctx->is_multipart = 1;
-        ctx->mp_boundary = extract_boundary(content_type);
-        if (ctx->mp_boundary != NULL) {
-            ctx->mp_parser = multipart_parser_init(ctx->mp_boundary, &g_mp_settings);
-            if (ctx->mp_parser == NULL) {
-                free(ctx->mp_boundary);
-                ctx->mp_boundary = NULL;
-                ctx->mp_error = 1;
+
+        ctx->mp = mp_state_alloc();
+        if (ctx->mp == NULL) {
+            ctx->reject_status = 500;
+            return -1;
+        }
+
+        ctx->mp->boundary = extract_boundary(content_type);
+        if (ctx->mp->boundary != NULL) {
+            ctx->mp->parser = multipart_parser_init(ctx->mp->boundary, &g_mp_settings);
+            if (ctx->mp->parser == NULL) {
                 ctx->reject_status = 500;
                 return -1;
             }
-            multipart_parser_set_data(ctx->mp_parser, ctx);
+            multipart_parser_set_data(ctx->mp->parser, ctx);
         } else {
-            ctx->mp_error = 1;
+            ctx->mp->error = 1;
             ctx->reject_status = 400;
             return -1;
         }
@@ -1132,13 +1154,13 @@ static int on_body_c(llhttp_t* parser, const char* at, size_t length) {
     client_ctx_t* ctx = (client_ctx_t*)parser->data;
 
     if (ctx->is_multipart) {
-        if (ctx->mp_parser == NULL || ctx->mp_error) {
+        if (ctx->mp == NULL || ctx->mp->parser == NULL || ctx->mp->error) {
             ctx->reject_status = 400;
             return -1;
         }
-        size_t parsed = multipart_parser_execute(ctx->mp_parser, at, length);
+        size_t parsed = multipart_parser_execute(ctx->mp->parser, at, length);
         if (parsed != length) {
-            ctx->mp_error = 1;
+            ctx->mp->error = 1;
             if (ctx->reject_status == 0) {
                 ctx->reject_status = 400;
             }
@@ -1157,7 +1179,7 @@ static int on_body_c(llhttp_t* parser, const char* at, size_t length) {
 static int on_message_complete_c(llhttp_t* parser) {
     client_ctx_t* ctx = (client_ctx_t*)parser->data;
 
-    if (ctx->mp_error) {
+    if (ctx->mp != NULL && ctx->mp->error) {
         send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
         return 0;
     }
@@ -1174,19 +1196,22 @@ static int on_message_complete_c(llhttp_t* parser) {
     const char* body = ctx->body.data ? ctx->body.data : "";
 
     /* 2.3: build FFI arrays for multipart data (on the stack). */
+    int form_count = ctx->mp ? ctx->mp->form_count : 0;
+    int file_count = ctx->mp ? ctx->mp->file_count : 0;
+
     c_form_field_t form_arr[100];
-    for (int i = 0; i < ctx->mp_form_count; i++) {
-        form_arr[i].name = ctx->mp_form[i].name;
-        form_arr[i].value = ctx->mp_form[i].value;
-        form_arr[i].value_len = ctx->mp_form[i].value_len;
+    for (int i = 0; i < form_count; i++) {
+        form_arr[i].name = ctx->mp->form[i].name;
+        form_arr[i].value = ctx->mp->form[i].value;
+        form_arr[i].value_len = ctx->mp->form[i].value_len;
     }
     c_file_part_t file_arr[100];
-    for (int i = 0; i < ctx->mp_file_count; i++) {
-        file_arr[i].name = ctx->mp_files[i].name;
-        file_arr[i].filename = ctx->mp_files[i].filename;
-        file_arr[i].content_type = ctx->mp_files[i].content_type;
-        file_arr[i].path = ctx->mp_files[i].path;
-        file_arr[i].size = ctx->mp_files[i].size;
+    for (int i = 0; i < file_count; i++) {
+        file_arr[i].name = ctx->mp->files[i].name;
+        file_arr[i].filename = ctx->mp->files[i].filename;
+        file_arr[i].content_type = ctx->mp->files[i].content_type;
+        file_arr[i].path = ctx->mp->files[i].path;
+        file_arr[i].size = ctx->mp->files[i].size;
     }
 
     struct timespec start, end;
@@ -1196,28 +1221,28 @@ static int on_message_complete_c(llhttp_t* parser) {
     size_t resp_len = 0;
     int resp_owned = MOJO_RESP_OWNED;
     char* response = mojo_handler(router, url, method, headers, body, &resp_len,
-        &resp_owned, ctx->url.len, ctx->headers.len, ctx->body.len,
-        form_arr, (size_t)ctx->mp_form_count,
-            file_arr, (size_t)ctx->mp_file_count);
+                                &resp_owned, ctx->url.len, ctx->headers.len, ctx->body.len,
+                                form_arr, (size_t)form_count,
+                                file_arr, (size_t)file_count);
 
-        double duration_ms = 0;
-        if (log_on) {
-            clock_gettime(CLOCK_MONOTONIC, &end);
-            duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
-            (end.tv_nsec - start.tv_nsec) / 1000000.0;
-        }
+    double duration_ms = 0;
+    if (log_on) {
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
+        (end.tv_nsec - start.tv_nsec) / 1000000.0;
+    }
 
-        int status = 500;
-        int keep_alive = ctx->keep_alive;
-        if (response != NULL) {
-            if (resp_len == 0) resp_len = strlen(response);
-            status = extract_status_from_response(response, resp_len);
-            send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
-        } else {
-            send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
-        }
-        if (log_on) log_request(method, url, status, duration_ms);
-        return 0;
+    int status = 500;
+    int keep_alive = ctx->keep_alive;
+    if (response != NULL) {
+        if (resp_len == 0) resp_len = strlen(response);
+        status = extract_status_from_response(response, resp_len);
+        send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
+    } else {
+        send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
+    }
+    if (log_on) log_request(method, url, status, duration_ms);
+    return 0;
 }
 
 /* ================= read ================= */
@@ -1354,19 +1379,14 @@ static void on_connection_c(uv_stream_t* server, int status) {
     buf_init(&ctx->headers); ctx->headers.arena_backed = 1;
     buf_init(&ctx->body); ctx->body.arena_backed = 1;
     buf_init(&ctx->pending); ctx->pending.arena_backed = 1;
-    ctx->mp_field_value.data = NULL;
-    ctx->mp_field_value.len = 0;
-    ctx->mp_field_value.cap = 0;
-    ctx->mp_field_value.arena_backed = 0;
-    ctx->mp_form_count = 0;
-    ctx->mp_file_count = 0;
 
     ctx->header_state = HEADER_STATE_NONE;
     ctx->processing = 0;
     ctx->last_active_ms = uv_now(server->loop);
     ctx->heap_index = -1;
-    ctx->mp_last_header = MP_HDR_NONE;
     ctx->expect_files = 0;
+    ctx->is_multipart = 0;
+    ctx->mp = NULL;
 
     llhttp_init(&ctx->parser, HTTP_REQUEST, &g_settings);
     ctx->parser.data = ctx;
