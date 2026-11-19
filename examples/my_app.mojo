@@ -6,6 +6,33 @@ from test_html_page import test_html_page, test_css
 from test_handlers import dto_validation_test, user_handler
 
 
+# Multipart upload test handler (machine-readable output for E2E tests).
+def upload_handler(mut req: HTTPRequest) -> HTTPResponse:
+    var body = (
+        "form_count="
+        + String(req.form_count())
+        + ", file_count="
+        + String(req.file_count())
+        + "\n"
+    )
+    if req.multipart:
+        for key in req.multipart.value().form.keys():
+            body += "form[" + key + "]=" + req.get_form(key) + "\n"
+    for f in req.get_files():
+        body += (
+            "file[name="
+            + f.name
+            + ",filename="
+            + f.filename
+            + ",size="
+            + String(f.size)
+            + ",content_type="
+            + f.content_type
+            + "]\n"
+        )
+    return HTTPResponse(200, body)
+
+
 # Hello world plain text response
 def hello_world(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, "Hello, World")
@@ -178,6 +205,7 @@ def main():
     router.get("/user/:id/posts/:post_id", post_handler)
     router.post("/move-page/:page_id/:move_to", move_page_handler)
 
+    router.post_upload("/upload", upload_handler)
     var server = HTTPServer(router)
     server.listen(8080)
     server.run()
