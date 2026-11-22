@@ -206,6 +206,9 @@ def main():
     router.post("/move-page/:page_id/:move_to", move_page_handler)
 
     router.post_upload("/upload", upload_handler)
+
+    router.static("/static", "./static")
+
     var server = HTTPServer(router)
     server.listen(8080)
     server.run()
