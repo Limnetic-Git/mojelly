@@ -1,5 +1,6 @@
 from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
+from mojelly.websockets.connection import WebSocketHandler
 
 
 comptime Handler = def(mut HTTPRequest) thin -> HTTPResponse
@@ -167,12 +168,18 @@ struct RouterHandlers:
     var patterns: List[CompiledPattern]
     var upload_routes: Dict[String, Bool]
     var static_mounts: Dict[String, String]
+    var websocket_routes: Dict[String, WebSocketHandler]
+    var websocket_patterns: List[CompiledPattern]
+    var websocket_handlers: List[WebSocketHandler]
 
     def __init__(out self):
         self.exact = Dict[String, Dict[String, Handler]]()
         self.patterns = List[CompiledPattern]()
         self.upload_routes = Dict[String, Bool]()
         self.static_mounts = Dict[String, String]()
+        self.websocket_routes = Dict[String, WebSocketHandler]()
+        self.websocket_patterns = List[CompiledPattern]()
+        self.websocket_handlers = List[WebSocketHandler]()
 
     def _insert_exact(
         mut self, method: String, path: String, handler: Handler
@@ -235,6 +242,32 @@ struct RouterHandlers:
                 pass
         return None
 
+    def websocket(mut self, path: String, handler: WebSocketHandler):
+        """Register a message callback on the same port as HTTP routes."""
+        var compiled = compile_pattern(path, _websocket_upgrade_required, "GET")
+        if compiled:
+            self.websocket_patterns.append(compiled.take())
+            self.websocket_handlers.append(handler)
+        else:
+            self.websocket_routes[path] = handler
+
+    def match_websocket(
+        self, mut request: HTTPRequest
+    ) -> Optional[WebSocketHandler]:
+        if request.method != "GET":
+            return None
+        if request.path in self.websocket_routes:
+            return self.websocket_routes.get(request.path)
+        var segments = split_segments(request.path)
+        for i in range(len(self.websocket_patterns)):
+            var params = match_compiled(
+                self.websocket_patterns[i], request.path, segments
+            )
+            if params:
+                request.params = params.take()
+                return self.websocket_handlers[i]
+        return None
+
     def handle(self, mut request: HTTPRequest) -> HTTPResponse:
         var method = request.method
         var path = request.path
@@ -266,4 +299,12 @@ struct RouterHandlers:
                 request.params = params.take()
                 return cp.handler(request)
 
+        if self.match_websocket(request):
+            return _websocket_upgrade_required(request)
         return HTTPResponse(404, "Not Found")
+
+
+def _websocket_upgrade_required(mut request: HTTPRequest) -> HTTPResponse:
+    var response = HTTPResponse(426, "WebSocket upgrade required")
+    response.set_header("Upgrade", "websocket")
+    return response^

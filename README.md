@@ -55,6 +55,90 @@ Safe defaults, overridable with environment variables at startup:
 
 Timeouts are checked once a second, so they are accurate to about one second.
 
+## WebSockets
+
+Register WebSocket message callbacks alongside HTTP routes in `examples/my_app.mojo`:
+
+```mojo
+from mojelly.websockets import WebSocket, Bytes
+
+
+def echo(mut socket: WebSocket, data: Bytes) raises:
+    if socket.is_text():
+        socket.send_text(String(from_utf8_lossy=data[:]))
+    else:
+        socket.send_binary(data)
+
+
+def main():
+    var router = RouterHandlers()
+    router.get("/", hello_world)
+    router.websocket("/ws", echo)
+    router.websocket("/rooms/:room", echo)
+    # Keep the usual HTTPServer startup here.
+```
+
+Run `bash build.sh`, then `./server`. HTTP and WebSocket routes share port 8080,
+including the same libuv workers. The example app exposes an echo endpoint at
+`ws://localhost:8080/ws` and a room endpoint at `/ws/:room`.
+
+```javascript
+const socket = new WebSocket("ws://localhost:8080/ws");
+socket.onopen = () => socket.send("Hello from the browser");
+socket.onmessage = (event) => console.log(event.data);
+```
+
+Callbacks receive complete messages after fragment reassembly. `socket.is_text()`
+distinguishes text from binary; binary payloads preserve all bytes, including NUL.
+`socket.request` exposes the original HTTP headers, cookies, query parameters and
+route parameters, for example `socket.request.get_param("room")`. Exact routes
+are checked before `:param` and `*wildcard` patterns. Ordinary HTTP handlers on
+the same path continue to handle requests without an upgrade. A WebSocket-only
+path returns `426 Upgrade Required` to an ordinary GET.
+
+Use `socket.send_text(...)`, `socket.send_binary(...)`, `socket.ping(...)` and
+`socket.close(code=1000, reason="")` inside callbacks. Sends queue output on the
+current worker. Callbacks must return promptly and must not retain the borrowed
+socket or block the event loop. An exception closes that connection with code
+1011. Ping/Pong, UTF-8 validation and the closing handshake are handled by the
+protocol. Callbacks run on different workers for different connections; shared
+application state needs synchronization.
+
+`MOJELLY_MAX_BODY` also limits WebSocket message size, including fragmented
+messages. `MOJELLY_MAX_HEADER_SIZE` bounds upgrade headers, and
+`MOJELLY_IDLE_TIMEOUT` applies to upgraded connections. Pending output is capped
+at 20 MiB per connection; slow readers exceeding this bound are disconnected.
+A server-initiated close has a five-second deadline. HTTP request timeouts stop
+applying after a successful upgrade. No Origin allowlist or authentication is
+applied automatically; validate access at a trusted reverse proxy when needed.
+
+The standalone client and epoll server are also available through
+`mojelly.websockets.sync.client` and `mojelly.websockets.sync.server`. Link the C
+transport built by `build.sh` when using them outside the generated app:
+
+```bash
+pixi run mojo build -I. your_client.mojo -o your_client -Xlinker -L./lib -Xlinker -lmojelly
+./your_client
+```
+
+```mojo
+from mojelly.websockets.sync.client import connect
+
+
+def main() raises:
+    with connect("ws://localhost:8080/ws") as socket:
+        socket.send_text("Hello from Mojo")
+        print(socket.recv_text())
+```
+
+The transport supports plain `ws://`. Terminate TLS at a reverse proxy for
+browser `wss://` connections. The WebSocket modules include code derived from
+[mojo-websockets](https://github.com/msaelices/mojo-websockets) under the MIT license;
+source files retain the upstream attribution.
+
+Run `pixi run test` for the full suite, or `python3 tests/test_websockets_e2e.py`
+after building the server for the WebSocket integration suite.
+
 ## Performance CI 📈
 
 Every PR to `main` or `dev` is benchmarked by `.github/workflows/perf.yml`: the **PR head**, **dev** and **main** are built and measured one after another on the same runner, and the result is posted as a PR comment. For each scenario (`/json` with 100 and 500 connections, a new connection per request, browser-like headers and cookies, a larger `/html` body) it shows requests/s, p99 latency and server CPU per request, and the PR's change against `dev` and `main`. The job fails if the PR is more than 15% slower than its base branch and the change is larger than the run-to-run noise.
