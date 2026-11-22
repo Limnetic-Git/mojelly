@@ -22,6 +22,10 @@ struct RouterBuilder:
         self.paths.append(path)
         self.handler_names.append(handler_name)
 
+    def websocket(mut self, path: String, handler_name: String):
+        self.paths.append(path)
+        self.handler_names.append(handler_name)
+
     def get_paths(self) -> List[String]:
         var copy = List[String]()
         for i in range(len(self.paths)):

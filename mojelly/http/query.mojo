@@ -277,16 +277,16 @@ struct QueryParams(Copyable, Movable):
         self._raw = qs.copy()
         self._cache = None
 
-    def __copyinit__(out self, existing: Self):
-        self._raw = existing._raw.copy()
-        if existing._cache:
-            self._cache = existing._cache.value().copy()
+    def __init__(out self, *, copy: Self):
+        self._raw = copy._raw.copy()
+        if copy._cache:
+            self._cache = copy._cache.value().copy()
         else:
             self._cache = None
 
-    def __moveinit__(out self, deinit existing: Self):
-        self._raw = existing._raw^
-        self._cache = existing._cache^
+    def __init__(out self, *, deinit move: Self):
+        self._raw = move._raw^
+        self._cache = move._cache^
 
     # ---- Lazy ensure ----
 

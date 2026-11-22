@@ -1,6 +1,7 @@
 from mojelly.http.request import HTTPRequest
 from mojelly.http.response import HTTPResponse
 from mojelly.core.router_handlers import RouterHandlers
+from mojelly.websockets import WebSocket, Bytes
 from dto import UserDTO
 from test_html_page import test_html_page, test_css
 from test_handlers import dto_validation_test, user_handler
@@ -181,6 +182,31 @@ def echo_test(mut req: HTTPRequest) -> HTTPResponse:
     return HTTPResponse(200, String(req.body.byte_length()) + ":" + req.body)
 
 
+def websocket_echo(mut socket: WebSocket, data: Bytes) raises:
+    """Echo complete text and binary messages without blocking the worker."""
+    if socket.is_text():
+        socket.send_text(String(from_utf8_lossy=data[:]))
+    else:
+        socket.send_binary(data)
+
+
+def websocket_room(mut socket: WebSocket, data: Bytes) raises:
+    socket.send_text(
+        socket.request.get_param("room") + ":" + String(from_utf8_lossy=data[:])
+    )
+
+
+def websocket_control(mut socket: WebSocket, data: Bytes) raises:
+    """Demonstrate a server-initiated close and isolated callback errors."""
+    var command = String(from_utf8_lossy=data[:])
+    if command == "close":
+        socket.close(reason="done")
+    elif command == "error":
+        raise Error("Example callback failure")
+    elif command == "ping":
+        socket.ping(data)
+
+
 def main():
     var router = RouterHandlers()
 
@@ -208,6 +234,9 @@ def main():
     router.post_upload("/upload", upload_handler)
 
     router.static("/static", "./static")
+    router.websocket("/ws", websocket_echo)
+    router.websocket("/ws/:room", websocket_room)
+    router.websocket("/ws/control", websocket_control)
 
     var server = HTTPServer(router)
     server.listen(8080)

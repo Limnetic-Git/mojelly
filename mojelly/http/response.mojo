@@ -103,7 +103,9 @@ def _strip_crlf(s: String) -> String:
 
 
 def get_status_phrase(status: Int32) -> String:
-    if status == 200:
+    if status == 101:
+        return "Switching Protocols"
+    elif status == 200:
         return "OK"
     elif status == 201:
         return "Created"
@@ -127,6 +129,8 @@ def get_status_phrase(status: Int32) -> String:
         return "Not Found"
     elif status == 405:
         return "Method Not Allowed"
+    elif status == 426:
+        return "Upgrade Required"
     elif status == 500:
         return "Internal Server Error"
     elif status == 502:

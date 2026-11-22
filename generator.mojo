@@ -350,6 +350,7 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
     patterns["router.patch("] = "PATCH"
     patterns["router.add("] = "GET"
     patterns["router.post_upload("] = "POST"
+    patterns["router.websocket("] = "WEBSOCKET"
 
     for line_span in lines:
         var line = String(line_span)
@@ -763,6 +764,8 @@ def generate_dto_wrappers_code(
     for key in routes.keys():
         var handler = routes.get(key, "")
         var dto_type = handler_dtos.get(handler, "")
+        if key.startswith("WEBSOCKET:"):
+            continue
         if handler == "" or dto_type == "" or generated.get(handler, "") != "":
             continue
 
@@ -806,6 +809,15 @@ def generate_routes_code(
         var path = String(key[byte = colon + 1 : len(key.as_bytes())])
         var handler = routes.get(keys[i], "")
         if handler != "":
+            if method == "WEBSOCKET":
+                code += (
+                    '    router_ptr[].websocket("'
+                    + path
+                    + '", '
+                    + handler
+                    + ")\n"
+                )
+                continue
             var registered_handler = handler
             if handler_dtos.get(handler, "") != "":
                 registered_handler = generated_dto_wrapper_name(handler)
@@ -881,6 +893,8 @@ def generate_server(user_file: String) -> Optional[String]:
         var handler = routes.get(key, "")
         if handler == "":
             continue
+        if key.startswith("WEBSOCKET:"):
+            continue
         if handler_dtos.get(handler, "") != "":
             continue
         if local_defs.get(handler, False):
@@ -924,7 +938,7 @@ def main():
     var layout = Layout[RouterHandlers].single()
     var alloc_result = alloc(layout)
     var router_ptr = alloc_result^.unsafe_leak()
-    router_ptr[] = RouterHandlers()
+    router_ptr.unsafe_write(RouterHandlers())
 
 ROUTES_PLACEHOLDER
 
@@ -946,11 +960,14 @@ def main():
     print("🍇 Mojelly HTTP Server (Single-threaded)")
 
     var port: Int32 = 8080
-    var router = RouterHandlers()
+    var layout = Layout[RouterHandlers].single()
+    var alloc_result = alloc(layout)
+    var router_ptr = alloc_result^.unsafe_leak()
+    router_ptr.unsafe_write(RouterHandlers())
 
 ROUTES_PLACEHOLDER
 
-    var server = HTTPServer(router^)
+    var server = HTTPServer(router_ptr[])
     server.listen(port)
     server.run()
 """
@@ -967,6 +984,7 @@ from mojelly.http.request import HTTPRequest, MultipartData, FilePart
 from mojelly.http.response import HTTPResponse, get_status_phrase, _has_crlf, _strip_crlf
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
+from mojelly.websockets.bridge import websocket_open, websocket_receive, websocket_free
 from std.memory import Pointer
 from std.memory.alloc import alloc, dealloc, Layout, ThinAllocation
 from std.ffi import external_call
@@ -991,6 +1009,36 @@ comptime C_void = Pointer[NoneType, MutUntrackedOrigin]
 comptime C_UInt8 = Pointer[UInt8, MutUntrackedOrigin]
 comptime C_uv_loop = Pointer[uv_loop_t, MutUntrackedOrigin]
 comptime C_uv_tcp = Pointer[uv_tcp_t, MutUntrackedOrigin]
+
+# ============================================================
+# WEBSOCKET CALLBACKS
+# ============================================================
+
+@export
+def mojo_websocket_open(
+    router: C_void, url: C_UInt8, url_len: UInt64,
+    method: C_UInt8, method_len: UInt64,
+    headers: C_UInt8, headers_len: UInt64,
+    major: Int32, minor: Int32, max_size: UInt64, max_header_size: UInt64,
+    out_data: Pointer[UInt64, MutUntrackedOrigin],
+    out_len: Pointer[UInt64, MutUntrackedOrigin],
+) abi("C") -> UInt64:
+    return websocket_open(router.unsafe_bitcast[RouterHandlers](), url, url_len,
+        method, method_len, headers, headers_len, major, minor, max_size, max_header_size,
+        out_data, out_len)
+
+@export
+def mojo_websocket_receive(
+    state: C_void, data: C_UInt8, length: UInt64,
+    out_data: Pointer[UInt64, MutUntrackedOrigin],
+    out_len: Pointer[UInt64, MutUntrackedOrigin],
+    out_close: Pointer[Int32, MutUntrackedOrigin],
+) abi("C"):
+    websocket_receive(state, data, length, out_data, out_len, out_close)
+
+@export
+def mojo_websocket_free(state: C_void) abi("C"):
+    websocket_free(state)
 
 # ============================================================
 # STRUCTURES FOR C (must match c_form_field_t / c_file_part_t)
@@ -1026,8 +1074,11 @@ def uv_loop_create_wrapper() -> C_uv_loop:
 def uv_loop_destroy_wrapper(loop: C_uv_loop) -> None:
     external_call["uv_loop_destroy_wrapper", NoneType, C_uv_loop](loop)
 
-def uv_tcp_init_wrapper(loop: C_uv_loop, tcp: C_uv_tcp) -> None:
-    external_call["uv_tcp_init_wrapper", NoneType, C_uv_loop, C_uv_tcp](loop, tcp)
+def uv_tcp_create_wrapper(loop: C_uv_loop) -> C_uv_tcp:
+    return external_call["uv_tcp_create_wrapper", C_uv_tcp, C_uv_loop](loop)
+
+def uv_tcp_destroy_wrapper(tcp: C_uv_tcp):
+    external_call["uv_tcp_destroy_wrapper", NoneType, C_uv_tcp](tcp)
 
 def uv_tcp_bind_wrapper(tcp: C_uv_tcp, ip: C_UInt8, port: Int32) -> None:
     external_call["uv_tcp_bind_wrapper", NoneType, C_uv_tcp, C_UInt8, Int32](tcp, ip, port)
@@ -1200,11 +1251,7 @@ struct HTTPServer:
 
     def __init__(out self, mut router: RouterHandlers):
         self.loop = uv_loop_create_wrapper()
-        var server_layout = Layout[uv_tcp_t].single()
-        var server_alloc = alloc(server_layout)
-        self.server = server_alloc^.unsafe_leak()
-
-        uv_tcp_init_wrapper(self.loop, self.server)
+        self.server = uv_tcp_create_wrapper(self.loop)
 
         self.router = router^
         router = RouterHandlers()
@@ -1218,7 +1265,7 @@ struct HTTPServer:
 
     def __deinit__(deinit self):
         uv_loop_destroy_wrapper(self.loop)
-        dealloc(ThinAllocation(unsafe_owned_ptr=self.server).unsafe_with_layout(Layout[uv_tcp_t].single()))
+        uv_tcp_destroy_wrapper(self.server)
 
     def listen(mut self, port: Int32, host: String = "0.0.0.0"):
         var ip_cstr = string_to_c_string(host)

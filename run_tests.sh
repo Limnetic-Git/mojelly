@@ -52,6 +52,7 @@ run_unit_test "tests/test_router_params.mojo" "Router Params Suite"
 run_unit_test "tests/test_router_builder.mojo" "RouterBuilder Suite"
 run_unit_test "tests/test_query.mojo" "Query String Suite"
 run_unit_test "tests/test_generator_helpers.mojo" "Generator Helpers Suite"
+run_unit_test "tests/test_websockets.mojo" "WebSocket Suite"
 
 # 2. Python E2E Integration Suite
 echo -e "${BLUE}--- 2. End-to-End Server Integration Suite ---${NC}"
@@ -108,6 +109,15 @@ if python3 tests/test_static_e2e.py; then
     echo -e "${GREEN}✔ Static Files Suite passed${NC}\n"
 else
     echo -e "${RED}✘ Static Files Suite failed${NC}\n"
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+
+echo -e "${BLUE}--- WebSocket Integration Suite ---${NC}"
+_kill_server
+if python3 tests/test_websockets_e2e.py; then
+    echo -e "${GREEN}✔ WebSocket Suite passed${NC}\n"
+else
+    echo -e "${RED}✘ WebSocket Suite failed${NC}\n"
     FAILED_TESTS=$((FAILED_TESTS + 1))
 fi
 

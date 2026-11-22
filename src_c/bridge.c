@@ -210,6 +210,14 @@ extern char* mojo_handler(void* router, const char* url, const char* method,
                           c_form_field_t* form, size_t form_count,
                           c_file_part_t* files, size_t file_count);
 
+extern uint64_t mojo_websocket_open(void* router,
+    const char* url, uint64_t url_len, const char* method, uint64_t method_len,
+    const char* headers, uint64_t headers_len, int32_t major, int32_t minor,
+    uint64_t max_size, uint64_t max_header_size, uint64_t* out_data, uint64_t* out_len);
+extern void mojo_websocket_receive(void* state, const char* data, uint64_t len,
+    uint64_t* out_data, uint64_t* out_len, int32_t* out_close);
+extern void mojo_websocket_free(void* state);
+
 static void* global_router = NULL;
 void mojelly_set_router(void* router) { global_router = router; }
 
@@ -397,6 +405,9 @@ typedef struct client_ctx {
     header_state_t header_state;
     int keep_alive;
     int processing;
+    int websocket_active;
+    void* websocket;
+    uint64_t websocket_closing_ms;
     void* router;
     int reject_status;
     uint64_t last_active_ms;
@@ -515,6 +526,10 @@ static client_ctx_t* ctx_alloc(void) {
 
 static void ctx_free(client_ctx_t* c) {
     if (!c) return;
+    if (c->websocket != NULL) {
+        mojo_websocket_free(c->websocket);
+        c->websocket = NULL;
+    }
     mp_state_free(c->mp);
     c->mp = NULL;
     static_transfer_free(c->static_tx);
@@ -773,6 +788,44 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
 static void send_response(uv_tcp_t* client, const char* response, size_t len,
                             int keep_alive, int owned);
 
+static void send_parse_error(client_ctx_t* ctx);
+
+static void websocket_receive(client_ctx_t* ctx, const char* data, size_t len) {
+    if (ctx->websocket == NULL || uv_is_closing((uv_handle_t*)&ctx->client)) return;
+    uint64_t output_address = 0;
+    uint64_t output_len = 0;
+    int32_t close_state = 0;
+    mojo_websocket_receive(ctx->websocket, data, len, &output_address, &output_len, &close_state);
+    char* output = (char*)(uintptr_t)output_address;
+    if (close_state == 2 && ctx->websocket_closing_ms == 0)
+        ctx->websocket_closing_ms = uv_now(ctx->client.loop);
+    /* Bound queued output for clients that stop reading. */
+    if ((output_len > 0 && output == NULL) || output_len > (20UL << 20) ||
+        uv_stream_get_write_queue_size((uv_stream_t*)&ctx->client) > (20UL << 20) - output_len) {
+        free(output);
+        uv_close((uv_handle_t*)&ctx->client, on_close_c);
+        return;
+    }
+    if (close_state == 1) uv_read_stop((uv_stream_t*)&ctx->client);
+    if (output_len > 0) {
+        send_response(&ctx->client, output, (size_t)output_len, close_state != 1, MOJO_RESP_OWNED);
+    } else if (close_state == 1) {
+        /* Queue an empty write so earlier frames drain before closing. */
+        send_response(&ctx->client, "", 0, 0, MOJO_RESP_BORROWED);
+    }
+}
+
+static void execute_http(client_ctx_t* ctx, const char* data, size_t len) {
+    enum llhttp_errno err = llhttp_execute(&ctx->parser, data, len);
+    if (err == HPE_PAUSED_UPGRADE && ctx->websocket_active) {
+        const char* rest = llhttp_get_error_pos(&ctx->parser);
+        if (ctx->websocket != NULL && rest != NULL && rest < data + len)
+            websocket_receive(ctx, rest, (size_t)(data + len - rest));
+        return;
+    }
+    if (err != HPE_OK) send_parse_error(ctx);
+}
+
 /* ================= Keep-alive reset ================= */
 
 static void reset_for_next_request(client_ctx_t* ctx) {
@@ -803,15 +856,8 @@ static void reset_for_next_request(client_ctx_t* ctx) {
         ctx->pending.cap = 0;
         ctx->pending.arena_backed = 0;
 
-        enum llhttp_errno err = llhttp_execute(&ctx->parser, pdata, plen);
+        execute_http(ctx, pdata, plen);
         free(pdata);
-        if (err != HPE_OK) {
-            const char* resp = (ctx->reject_status == 415) ? http_415 :
-            (ctx->reject_status == 431) ? http_431 :
-            (ctx->reject_status == 413) ? http_413 : http_400;
-            send_response(&ctx->client, resp, strlen(resp), 0, MOJO_RESP_BORROWED);
-            uv_read_stop((uv_stream_t*)&ctx->client);
-        }
     }
 }
 
@@ -1224,7 +1270,7 @@ static void finish_write(write_req_t* wr, int status) {
         uv_close((uv_handle_t*)client, on_close_c);
         return;
     }
-    if (ctx != NULL) {
+    if (ctx != NULL && !ctx->websocket_active) {
         reset_for_next_request(ctx);
     }
 }
@@ -1647,6 +1693,8 @@ static int on_headers_complete_c(llhttp_t* parser) {
     }
     ctx->header_state = HEADER_STATE_NONE;
     ctx->keep_alive = llhttp_should_keep_alive(parser);
+    /* llhttp must stop at the end of upgrade headers, before any frames. */
+    if (parser->upgrade) return 2;
     uint64_t cl = parser->content_length;
     if (cl != ULLONG_MAX && cl > g_max_body_size) {
         ctx->reject_status = 413;
@@ -1696,7 +1744,31 @@ static int on_message_complete_c(llhttp_t* parser) {
     const char* method = llhttp_method_name((llhttp_method_t)parser->method);
     const char* url = ctx->url.data ? ctx->url.data : "";
 
-    /* Попытка отдать статический файл напрямую через uv_fs_sendfile */
+    if (parser->upgrade) {
+        void* router = ctx->router ? ctx->router : global_router;
+        uint64_t output_address = 0;
+        uint64_t output_len = 0;
+        ctx->websocket_active = 1;
+        ctx->processing = 1;
+        ctx->request_started_ms = 0;
+        if (router != NULL) {
+            ctx->websocket = (void*)(uintptr_t)mojo_websocket_open(router, url, ctx->url.len,
+                method, strlen(method), ctx->headers.data, ctx->headers.len,
+                parser->http_major, parser->http_minor, g_max_body_size, g_max_header_size,
+                &output_address, &output_len);
+        }
+        char* output = (char*)(uintptr_t)output_address;
+        if (ctx->websocket == NULL) uv_read_stop((uv_stream_t*)&ctx->client);
+        if (output == NULL) {
+            send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
+        } else {
+            send_response(&ctx->client, output, (size_t)output_len,
+                          ctx->websocket != NULL, MOJO_RESP_OWNED);
+        }
+        return 0;
+    }
+
+    /* Serve static files directly through uv_fs_sendfile. */
     if (try_serve_static(ctx, method, url)) {
         return 0;
     }
@@ -1785,6 +1857,10 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
         uint64_t now = uv_now(client->loop);
         ctx->last_active_ms = now;
         heap_update(ctx);
+        if (ctx->websocket_active) {
+            websocket_receive(ctx, buf->base, (size_t)nread);
+            return;
+        }
         if (ctx->request_started_ms == 0 && !ctx->processing)
             ctx->request_started_ms = now;
 
@@ -1801,8 +1877,7 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
                 return;
             }
         } else {
-            enum llhttp_errno err = llhttp_execute(&ctx->parser, buf->base, (size_t)nread);
-            if (err != HPE_OK) send_parse_error(ctx);
+            execute_http(ctx, buf->base, (size_t)nread);
         }
     } else if (nread < 0) {
         client_ctx_t* ctx = (client_ctx_t*)client->data;
@@ -1838,6 +1913,11 @@ static void sweep_timeouts_c(uv_timer_t* timer) {
                 if (!uv_is_closing((uv_handle_t*)&c->client))
                     uv_close((uv_handle_t*)&c->client, on_close_c);
         }
+    }
+    for (client_ctx_t* c = conn_list; c != NULL; c = c->next) {
+        if (c->websocket_closing_ms != 0 && now - c->websocket_closing_ms >= 5000 &&
+            !uv_is_closing((uv_handle_t*)&c->client))
+            uv_close((uv_handle_t*)&c->client, on_close_c);
     }
     if (g_request_timeout_ms > 0) {
         uint64_t rt = (uint64_t)g_request_timeout_ms;
@@ -2134,6 +2214,15 @@ void mojelly_ensure_init(void) { ensure_settings_init(); }
 
 void uv_tcp_init_wrapper(uv_loop_t* loop, uv_tcp_t* tcp) { ensure_settings_init(); uv_tcp_init(loop, tcp); }
 
+uv_tcp_t* uv_tcp_create_wrapper(uv_loop_t* loop) {
+    uv_tcp_t* tcp = (uv_tcp_t*)calloc(1, sizeof(uv_tcp_t));
+    if (tcp == NULL) abort();
+    if (uv_tcp_init(loop, tcp) != 0) { free(tcp); abort(); }
+    return tcp;
+}
+
+void uv_tcp_destroy_wrapper(uv_tcp_t* tcp) { free(tcp); }
+
 void uv_tcp_bind_wrapper(uv_tcp_t* tcp, const char* ip, int port) {
     ensure_settings_init();
     struct sockaddr_in addr; uv_ip4_addr(ip, port, &addr);
@@ -2162,12 +2251,19 @@ void uv_write_wrapper(uv_tcp_t* client, const char* data, size_t len) {
     if (rc != 0) { free(wr->data); wr_release(wr); uv_close((uv_handle_t*)client, on_close_c); }
 }
 void uv_close_wrapper(uv_tcp_t* client) { if (client && !uv_is_closing((uv_handle_t*)client)) uv_close((uv_handle_t*)client, on_close_c); }
+typedef struct {
+    uv_loop_t loop;
+    uv_timer_t timeout_timer;
+} single_loop_t;
+
 uv_loop_t* uv_loop_create_wrapper(void) {
     ensure_settings_init();
-    uv_loop_t* loop = (uv_loop_t*)malloc(sizeof(uv_loop_t));
-    if (!loop) return NULL;
-    uv_loop_init(loop);
-    return loop;
+    single_loop_t* state = (single_loop_t*)calloc(1, sizeof(single_loop_t));
+    if (state == NULL) abort();
+    uv_loop_init(&state->loop);
+    uv_timer_init(&state->loop, &state->timeout_timer);
+    uv_timer_start(&state->timeout_timer, sweep_timeouts_c, 1000, 1000);
+    return &state->loop;
 }
 void uv_loop_destroy_wrapper(uv_loop_t* loop) {
     if (!loop) return;

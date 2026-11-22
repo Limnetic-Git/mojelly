@@ -3,7 +3,7 @@
 set -e
 
 USE_PIXI=true
-MOJO_VERSION="1.1.0"
+MOJO_VERSION="1.2.0"
 SHOW_WARNINGS=false
 
 run_mojo() {
@@ -45,7 +45,7 @@ channels = [
 platforms = ["linux-64"]
 
 [dependencies]
-mojo = "==1.1.0"
+mojo = "==1.2.0"
 emberjson = ">=0.3.0"
 
 [tasks]
@@ -126,7 +126,10 @@ if [ "$NEED_REBUILD" = true ]; then
         -fPIC \
         2>/dev/null || echo "⚠️ bridge_ssl.c not found or failed to compile"
 
-    OBJ_FILES="bridge.o"
+    gcc -c websockets.c -O3 -fPIC -o websockets.o
+    echo "✅ websockets.o built"
+
+    OBJ_FILES="bridge.o websockets.o"
     if [ -f "multipart_parser.o" ]; then
         OBJ_FILES="$OBJ_FILES multipart_parser.o"
     fi
@@ -134,7 +137,7 @@ if [ "$NEED_REBUILD" = true ]; then
         OBJ_FILES="$OBJ_FILES bridge_ssl.o"
     fi
     ar rcs ../lib/libmojelly.a $OBJ_FILES
-    rm -f bridge.o multipart_parser.o bridge_ssl.o 2>/dev/null
+    rm -f bridge.o multipart_parser.o bridge_ssl.o websockets.o 2>/dev/null
     cd ..
 
     echo "✅ libmojelly.a rebuilt!"
