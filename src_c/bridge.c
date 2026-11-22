@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -61,6 +62,8 @@ static _Thread_local int current_thread_id = -1;
 #define CTX_SLAB_MAX 1024
 #define WRITE_REQ_POOL_MAX 4096
 #define MAX_UPLOAD_ROUTES 64
+#define SENDFILE_CHUNK_SIZE (512 * 1024)
+#define SENDFILE_RETRY_MS 2
 
 static size_t g_max_header_size = 64UL << 10;
 static size_t g_max_body_size = 10UL << 20;
@@ -72,6 +75,62 @@ static long g_request_timeout_ms = 30 * 1000;
 static long g_shutdown_timeout_ms = 30 * 1000;
 
 static volatile sig_atomic_t g_shutdown = 0;
+
+/* ================= Static files config ================= */
+
+typedef struct {
+    char prefix[256];
+    size_t prefix_len;
+    char root_dir[PATH_MAX];
+    size_t root_len;
+    int enabled;
+} static_config_t;
+
+static static_config_t g_static = {{0}, 0, {0}, 0, 0};
+static int g_static_frozen = 0;
+static pthread_mutex_t g_static_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+int mojelly_set_static_dir(const char* prefix, const char* dir) {
+    if (prefix == NULL || dir == NULL || prefix[0] != '/') return -1;
+
+    char resolved[PATH_MAX];
+    if (realpath(dir, resolved) == NULL) return -1;
+
+    struct stat st;
+    if (stat(resolved, &st) != 0 || !S_ISDIR(st.st_mode)) return -1;
+
+    pthread_mutex_lock(&g_static_mutex);
+    if (g_static_frozen) {
+        pthread_mutex_unlock(&g_static_mutex);
+        return -1;
+    }
+
+    size_t plen = strlen(prefix);
+    while (plen > 1 && prefix[plen - 1] == '/') plen--;
+    if (plen >= sizeof(g_static.prefix)) {
+        pthread_mutex_unlock(&g_static_mutex);
+        return -1;
+    }
+
+    memcpy(g_static.prefix, prefix, plen);
+    g_static.prefix[plen] = '\0';
+    g_static.prefix_len = plen;
+
+    size_t rlen = strlen(resolved);
+    memcpy(g_static.root_dir, resolved, rlen + 1);
+    g_static.root_len = rlen;
+
+    __atomic_store_n(&g_static.enabled, 1, __ATOMIC_RELEASE);
+    fprintf(stderr, "[C] static dir mounted: %s -> %s\n", g_static.prefix, g_static.root_dir);
+    pthread_mutex_unlock(&g_static_mutex);
+    return 0;
+}
+
+static void freeze_static_config(void) {
+    pthread_mutex_lock(&g_static_mutex);
+    __atomic_store_n(&g_static_frozen, 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&g_static_mutex);
+}
 
 /* ================= Upload route registry ================= */
 
@@ -251,6 +310,30 @@ static int buf_append_arena(buffer_t* b, arena_t* a, const char* data, size_t le
     return 0;
 }
 
+/* ================= Static transfer state machine ================= */
+
+typedef enum {
+    STATIC_STATE_IDLE = 0,
+    STATIC_STATE_SENDING_HEADERS,
+    STATIC_STATE_SENDING_FILE,
+    STATIC_STATE_RETRY_WAIT,
+    STATIC_STATE_ABORTING
+} static_state_t;
+
+typedef struct {
+    uv_fs_t fs_req;
+    uv_timer_t* retry_timer;
+    int file_fd;
+    int sock_fd;
+    int64_t offset;
+    int64_t file_size;
+    int keep_alive;
+    int in_flight;
+    int headers_writing;
+    int ctx_closing;
+    struct timespec start_ts;
+} static_transfer_t;
+
 /* ================= Client ctx ================= */
 
 typedef enum {
@@ -330,11 +413,39 @@ typedef struct client_ctx {
     int is_multipart;
 
     multipart_state_t* mp;   /* NULL для non-multipart */
+
+    static_state_t static_state;
+    static_transfer_t* static_tx; /* NULL для non-static */
 } client_ctx_t;
 
 static client_ctx_t* g_ctx_slab[CTX_SLAB_MAX];
 static int g_ctx_slab_len = 0;
 static pthread_mutex_t g_ctx_slab_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void on_retry_timer_close(uv_handle_t* h) {
+    free(h);
+}
+
+static void static_close_retry_timer(static_transfer_t* st) {
+    if (st == NULL || st->retry_timer == NULL) return;
+    uv_timer_t* t = st->retry_timer;
+    st->retry_timer = NULL;
+    uv_timer_stop(t);
+    t->data = NULL;
+    if (!uv_is_closing((uv_handle_t*)t)) {
+        uv_close((uv_handle_t*)t, on_retry_timer_close);
+    }
+}
+
+static void static_transfer_free(static_transfer_t* st) {
+    if (st == NULL) return;
+    static_close_retry_timer(st);
+    if (st->file_fd >= 0) {
+        close(st->file_fd);
+        st->file_fd = -1;
+    }
+    free(st);
+}
 
 static multipart_state_t* mp_state_alloc(void) {
     multipart_state_t* mp = (multipart_state_t*)calloc(1, sizeof(multipart_state_t));
@@ -406,6 +517,9 @@ static void ctx_free(client_ctx_t* c) {
     if (!c) return;
     mp_state_free(c->mp);
     c->mp = NULL;
+    static_transfer_free(c->static_tx);
+    c->static_tx = NULL;
+    c->static_state = STATIC_STATE_IDLE;
     arena_free(&c->arena);
     buf_free(&c->url);
     buf_free(&c->headers);
@@ -543,6 +657,9 @@ static int on_body_c(llhttp_t* parser, const char* at, size_t length);
 static int on_message_complete_c(llhttp_t* parser);
 
 static void mojelly_init_settings(void) {
+    /* sendfile(2) на закрытом сокете шлёт SIGPIPE — игнорируем, обрабатываем EPIPE */
+    signal(SIGPIPE, SIG_IGN);
+
     const char* lvl = getenv("MOJELLY_LOG_LEVEL");
     if (lvl != NULL) g_log_level = atoi(lvl);
     const char* v;
@@ -580,181 +697,573 @@ static inline void ensure_settings_init(void) {
 
 static const char* http_500 =
 "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    static const char* http_413 =
-    "HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    static const char* http_431 =
-    "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    static const char* http_415 =
-    "HTTP/1.1 415 Unsupported Media Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    static const char* http_400 =
-    "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+static const char* http_413 =
+"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+static const char* http_431 =
+"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+static const char* http_415 =
+"HTTP/1.1 415 Unsupported Media Type\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+static const char* http_400 =
+"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+static const char* http_403 =
+"HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden";
+static const char* http_404 =
+"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nContent-Type: text/plain\r\nConnection: keep-alive\r\n\r\nNot Found";
 
-    /* ================= Logging helpers ================= */
+/* ================= Logging helpers ================= */
 
-    static const char* get_method_color(const char* method) {
-        if (strcmp(method, "GET") == 0) return COLOR_CYAN;
-        if (strcmp(method, "POST") == 0) return COLOR_GREEN;
-        if (strcmp(method, "PUT") == 0) return COLOR_YELLOW;
-        if (strcmp(method, "DELETE") == 0) return COLOR_RED;
-        if (strcmp(method, "PATCH") == 0) return COLOR_MAGENTA;
-        return COLOR_BLUE;
+static const char* get_method_color(const char* method) {
+    if (strcmp(method, "GET") == 0) return COLOR_CYAN;
+    if (strcmp(method, "POST") == 0) return COLOR_GREEN;
+    if (strcmp(method, "PUT") == 0) return COLOR_YELLOW;
+    if (strcmp(method, "DELETE") == 0) return COLOR_RED;
+    if (strcmp(method, "PATCH") == 0) return COLOR_MAGENTA;
+    return COLOR_BLUE;
+}
+
+static const char* get_status_color(int status) {
+    if (status >= 200 && status < 300) return COLOR_GREEN;
+    if (status >= 300 && status < 400) return COLOR_CYAN;
+    if (status >= 400 && status < 500) return COLOR_YELLOW;
+    if (status >= 500) return COLOR_RED;
+    return COLOR_RESET;
+}
+
+static void log_request(const char* method, const char* url, int status, double duration_ms) {
+    const char* mc = get_method_color(method);
+    const char* sc = get_status_color(status);
+    static _Thread_local time_t cached_at = 0;
+    static _Thread_local char time_str[20] = "00:00:00";
+    time_t now = time(NULL);
+    if (now != cached_at) {
+        struct tm tm_info;
+        localtime_r(&now, &tm_info);
+        strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_info);
+        cached_at = now;
     }
+    printf("[%s] [T%d] %s%s%s %s%s%s %s%d%s %.2fms\n", time_str,
+            current_thread_id, mc, method, COLOR_RESET, COLOR_BOLD,
+            url, COLOR_RESET, sc, status, COLOR_RESET, duration_ms);
+}
 
-    static const char* get_status_color(int status) {
-        if (status >= 200 && status < 300) return COLOR_GREEN;
-        if (status >= 300 && status < 400) return COLOR_CYAN;
-        if (status >= 400 && status < 500) return COLOR_YELLOW;
-        if (status >= 500) return COLOR_RED;
-        return COLOR_RESET;
-    }
+/* ================= Conn list ================= */
 
-    static void log_request(const char* method, const char* url, int status, double duration_ms) {
-        const char* mc = get_method_color(method);
-        const char* sc = get_status_color(status);
-        static _Thread_local time_t cached_at = 0;
-        static _Thread_local char time_str[20] = "00:00:00";
-        time_t now = time(NULL);
-        if (now != cached_at) {
-            struct tm tm_info;
-            localtime_r(&now, &tm_info);
-            strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_info);
-            cached_at = now;
+static _Thread_local client_ctx_t* conn_list = NULL;
+
+static void conn_link(client_ctx_t* ctx) {
+    ctx->prev = NULL;
+    ctx->next = conn_list;
+    if (conn_list) conn_list->prev = ctx;
+    conn_list = ctx;
+    ctx->linked = 1;
+}
+
+static void conn_unlink(client_ctx_t* ctx) {
+    if (!ctx->linked) return;
+    if (ctx->prev) ctx->prev->next = ctx->next;
+    else conn_list = ctx->next;
+    if (ctx->next) ctx->next->prev = ctx->prev;
+    ctx->linked = 0;
+}
+
+/* ================= forward ================= */
+
+static void on_close_c(uv_handle_t* handle);
+static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
+static void send_response(uv_tcp_t* client, const char* response, size_t len,
+                            int keep_alive, int owned);
+
+/* ================= Keep-alive reset ================= */
+
+static void reset_for_next_request(client_ctx_t* ctx) {
+    ctx->last_active_ms = uv_now(ctx->client.loop);
+    ctx->request_started_ms = 0;
+    heap_update(ctx);
+    buf_reset(&ctx->url);
+    buf_reset(&ctx->headers);
+    buf_reset(&ctx->body);
+    arena_reset(&ctx->arena);
+    ctx->header_state = HEADER_STATE_NONE;
+    ctx->reject_status = 0;
+    ctx->processing = 0;
+    ctx->expect_files = 0;
+    ctx->is_multipart = 0;
+
+    mp_state_free(ctx->mp);
+    ctx->mp = NULL;
+
+    llhttp_init(&ctx->parser, HTTP_REQUEST, &g_settings);
+    ctx->parser.data = ctx;
+
+    if (ctx->pending.len > 0) {
+        char* pdata = ctx->pending.data;
+        size_t plen = ctx->pending.len;
+        ctx->pending.data = NULL;
+        ctx->pending.len = 0;
+        ctx->pending.cap = 0;
+        ctx->pending.arena_backed = 0;
+
+        enum llhttp_errno err = llhttp_execute(&ctx->parser, pdata, plen);
+        free(pdata);
+        if (err != HPE_OK) {
+            const char* resp = (ctx->reject_status == 415) ? http_415 :
+            (ctx->reject_status == 431) ? http_431 :
+            (ctx->reject_status == 413) ? http_413 : http_400;
+            send_response(&ctx->client, resp, strlen(resp), 0, MOJO_RESP_BORROWED);
+            uv_read_stop((uv_stream_t*)&ctx->client);
         }
-        printf("[%s] [T%d] %s%s%s %s%s%s %s%d%s %.2fms\n", time_str,
-               current_thread_id, mc, method, COLOR_RESET, COLOR_BOLD,
-               url, COLOR_RESET, sc, status, COLOR_RESET, duration_ms);
+    }
+}
+
+/* ================= close ================= */
+
+static void on_close_c(uv_handle_t* handle) {
+    client_ctx_t* ctx = (client_ctx_t*)handle->data;
+    if (ctx == NULL) return;
+    conn_unlink(ctx);
+    heap_remove(ctx);
+
+    if (ctx->static_tx != NULL) {
+        static_transfer_t* st = ctx->static_tx;
+        static_close_retry_timer(st);
+        ctx->static_state = STATIC_STATE_ABORTING;
+        st->ctx_closing = 1;
+        if (st->in_flight || st->headers_writing) {
+            /* Откладываем ctx_free до завершения async callback'а */
+            return;
+        }
+        static_transfer_free(st);
+        ctx->static_tx = NULL;
+        ctx->static_state = STATIC_STATE_IDLE;
     }
 
-    /* ================= Conn list ================= */
+    ctx_free(ctx);
+}
 
-    static _Thread_local client_ctx_t* conn_list = NULL;
+/* ================= Static files (uv_fs_sendfile) ================= */
 
-    static void conn_link(client_ctx_t* ctx) {
-        ctx->prev = NULL;
-        ctx->next = conn_list;
-        if (conn_list) conn_list->prev = ctx;
-        conn_list = ctx;
-        ctx->linked = 1;
+static int hex_val(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int url_decode_path(const char* src, size_t src_len, char* dst, size_t dst_sz) {
+    size_t out = 0;
+    for (size_t i = 0; i < src_len; i++) {
+        char c = src[i];
+        if (c == '%') {
+            if (i + 2 >= src_len) return -1;
+            int hi = hex_val(src[i + 1]);
+            int lo = hex_val(src[i + 2]);
+            if (hi < 0 || lo < 0) return -1;
+            unsigned char decoded = (unsigned char)((hi << 4) | lo);
+            if (decoded == 0) return -1; /* Запрещаем NUL-байт */
+                c = (char)decoded;
+            i += 2;
+        }
+        if (out + 1 >= dst_sz) return -1;
+        dst[out++] = c;
+    }
+    dst[out] = '\0';
+    return 0;
+}
+
+static const char* get_mime_type(const char* path) {
+    const char* dot = strrchr(path, '.');
+    if (dot == NULL || dot[1] == '\0') return "application/octet-stream";
+    dot++;
+    if (strcasecmp(dot, "html") == 0 || strcasecmp(dot, "htm") == 0) return "text/html; charset=utf-8";
+    if (strcasecmp(dot, "css") == 0) return "text/css; charset=utf-8";
+    if (strcasecmp(dot, "js") == 0 || strcasecmp(dot, "mjs") == 0) return "application/javascript; charset=utf-8";
+    if (strcasecmp(dot, "json") == 0) return "application/json; charset=utf-8";
+    if (strcasecmp(dot, "txt") == 0) return "text/plain; charset=utf-8";
+    if (strcasecmp(dot, "xml") == 0) return "application/xml; charset=utf-8";
+    if (strcasecmp(dot, "svg") == 0) return "image/svg+xml";
+    if (strcasecmp(dot, "png") == 0) return "image/png";
+    if (strcasecmp(dot, "jpg") == 0 || strcasecmp(dot, "jpeg") == 0) return "image/jpeg";
+    if (strcasecmp(dot, "gif") == 0) return "image/gif";
+    if (strcasecmp(dot, "webp") == 0) return "image/webp";
+    if (strcasecmp(dot, "ico") == 0) return "image/x-icon";
+    if (strcasecmp(dot, "woff2") == 0) return "font/woff2";
+    if (strcasecmp(dot, "woff") == 0) return "font/woff";
+    if (strcasecmp(dot, "ttf") == 0) return "font/ttf";
+    if (strcasecmp(dot, "pdf") == 0) return "application/pdf";
+    if (strcasecmp(dot, "wasm") == 0) return "application/wasm";
+    if (strcasecmp(dot, "mp4") == 0) return "video/mp4";
+    if (strcasecmp(dot, "webm") == 0) return "video/webm";
+    if (strcasecmp(dot, "mp3") == 0) return "audio/mpeg";
+    return "application/octet-stream";
+}
+
+/* Возвращает:
+    *   0 — валидный файл, путь записан в out_path
+    *   1 — не совпадает с префиксом (прокинуть в Mojo-роутер)
+    *  -1 — файл не найден / директория
+    *  -2 — попытка path traversal или невалидный URL
+    */
+static int resolve_static_file(const char* url, char* out_path, size_t out_sz) {
+    if (!__atomic_load_n(&g_static.enabled, __ATOMIC_ACQUIRE) || url == NULL) return 1;
+
+    const char* rel = NULL;
+    if (g_static.prefix_len == 1 && g_static.prefix[0] == '/') {
+        if (url[0] != '/') return 1;
+        rel = url + 1;
+    } else {
+        if (strncmp(url, g_static.prefix, g_static.prefix_len) != 0) return 1;
+        if (url[g_static.prefix_len] != '/') return 1;
+        rel = url + g_static.prefix_len + 1;
     }
 
-    static void conn_unlink(client_ctx_t* ctx) {
-        if (!ctx->linked) return;
-        if (ctx->prev) ctx->prev->next = ctx->next;
-        else conn_list = ctx->next;
-        if (ctx->next) ctx->next->prev = ctx->prev;
-        ctx->linked = 0;
+    size_t rel_len = 0;
+    while (rel[rel_len] != '\0' && rel[rel_len] != '?' && rel[rel_len] != '#') {
+        rel_len++;
+    }
+    if (rel_len == 0) return -1;
+
+    char decoded[PATH_MAX];
+    if (url_decode_path(rel, rel_len, decoded, sizeof(decoded)) != 0) return -2;
+
+    char candidate[PATH_MAX];
+    int n = snprintf(candidate, sizeof(candidate), "%s/%s", g_static.root_dir, decoded);
+    if (n < 0 || (size_t)n >= sizeof(candidate)) return -2;
+
+    char resolved[PATH_MAX];
+    if (realpath(candidate, resolved) == NULL) return -1;
+
+    if (strncmp(resolved, g_static.root_dir, g_static.root_len) != 0) return -2;
+    if (!(g_static.root_len == 1 && g_static.root_dir[0] == '/')) {
+        char boundary = resolved[g_static.root_len];
+        if (boundary != '/' && boundary != '\0') return -2;
     }
 
-    /* ================= forward ================= */
+    size_t res_len = strlen(resolved);
+    if (res_len >= out_sz) return -2;
+    memcpy(out_path, resolved, res_len + 1);
+    return 0;
+}
 
-    static void on_close_c(uv_handle_t* handle);
-    static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf);
-    static void send_response(uv_tcp_t* client, const char* response, size_t len,
-                              int keep_alive, int owned);
+static void static_finish_aborted(client_ctx_t* ctx) {
+    static_transfer_t* st = ctx->static_tx;
+    if (st == NULL) return;
+    if (st->in_flight || st->headers_writing) return;
 
-    /* ================= close ================= */
+    int should_free_ctx = st->ctx_closing;
+    static_transfer_free(st);
+    ctx->static_tx = NULL;
+    ctx->static_state = STATIC_STATE_IDLE;
 
-    static void on_close_c(uv_handle_t* handle) {
-        client_ctx_t* ctx = (client_ctx_t*)handle->data;
-        if (ctx == NULL) return;
-        conn_unlink(ctx);
-        heap_remove(ctx);
+    if (should_free_ctx) {
         ctx_free(ctx);
+    } else if (!uv_is_closing((uv_handle_t*)&ctx->client)) {
+        uv_close((uv_handle_t*)&ctx->client, on_close_c);
+    }
+}
+
+static void static_cleanup_and_finish(client_ctx_t* ctx, int ok) {
+    static_transfer_t* st = ctx->static_tx;
+    if (st == NULL) return;
+
+    int keep_alive = ok && st->keep_alive;
+    if (g_log_level >= 1) {
+        struct timespec end_ts;
+        clock_gettime(CLOCK_MONOTONIC, &end_ts);
+        double duration_ms = (end_ts.tv_sec - st->start_ts.tv_sec) * 1000.0 +
+        (end_ts.tv_nsec - st->start_ts.tv_nsec) / 1000000.0;
+        log_request("GET", ctx->url.data ? ctx->url.data : "", ok ? 200 : 500, duration_ms);
     }
 
-    /* ================= write ================= */
+    static_transfer_free(st);
+    ctx->static_tx = NULL;
+    ctx->static_state = STATIC_STATE_IDLE;
 
-    static void finish_write(write_req_t* wr, int status) {
-        if (wr->free_data && wr->data != NULL) free(wr->data);
-        wr->data = NULL;
-        uv_tcp_t* client = wr->client;
-        int keep_alive = wr->keep_alive;
-        wr_release(wr);
+    if (uv_is_closing((uv_handle_t*)&ctx->client)) return;
 
-        if (client == NULL || uv_is_closing((uv_handle_t*)client)) return;
+    if (!keep_alive) {
+        uv_close((uv_handle_t*)&ctx->client, on_close_c);
+        return;
+    }
 
-        client_ctx_t* ctx = (client_ctx_t*)client->data;
-        if (status != 0 || !keep_alive) {
-            uv_close((uv_handle_t*)client, on_close_c);
-            return;
+    reset_for_next_request(ctx);
+}
+
+static void on_sendfile_cb(uv_fs_t* req);
+
+static void sendfile_next_chunk(client_ctx_t* ctx) {
+    static_transfer_t* st = ctx->static_tx;
+    if (st == NULL) return;
+
+    if (st->offset >= st->file_size) {
+        static_cleanup_and_finish(ctx, 1);
+        return;
+    }
+
+    size_t remain = (size_t)(st->file_size - st->offset);
+    size_t chunk = remain > SENDFILE_CHUNK_SIZE ? SENDFILE_CHUNK_SIZE : remain;
+
+    st->fs_req.data = ctx;
+    st->in_flight = 1;
+    int rc = uv_fs_sendfile(ctx->client.loop, &st->fs_req,
+                            st->sock_fd, st->file_fd,
+                            st->offset, chunk, on_sendfile_cb);
+    if (rc < 0) {
+        st->in_flight = 0;
+        static_cleanup_and_finish(ctx, 0);
+    }
+}
+
+static void on_sendfile_retry_timer(uv_timer_t* t) {
+    client_ctx_t* ctx = (client_ctx_t*)t->data;
+    if (ctx == NULL) return;
+    static_transfer_t* st = ctx->static_tx;
+    if (st == NULL || ctx->static_state != STATIC_STATE_RETRY_WAIT ||
+        uv_is_closing((uv_handle_t*)&ctx->client)) {
+        return;
         }
-        if (ctx != NULL) {
-            ctx->last_active_ms = uv_now(client->loop);
+        ctx->static_state = STATIC_STATE_SENDING_FILE;
+    sendfile_next_chunk(ctx);
+}
+
+static void on_sendfile_cb(uv_fs_t* req) {
+    client_ctx_t* ctx = (client_ctx_t*)req->data;
+    ssize_t res = req->result;
+    uv_fs_req_cleanup(req);
+
+    if (ctx == NULL || ctx->static_tx == NULL) return;
+    static_transfer_t* st = ctx->static_tx;
+    st->in_flight = 0;
+
+    if (ctx->static_state == STATIC_STATE_ABORTING ||
+        uv_is_closing((uv_handle_t*)&ctx->client)) {
+        static_finish_aborted(ctx);
+    return;
+        }
+
+        if (res > 0) {
+            st->offset += res;
+            ctx->last_active_ms = uv_now(ctx->client.loop);
             heap_update(ctx);
-            buf_reset(&ctx->url);
-            buf_reset(&ctx->headers);
-            buf_reset(&ctx->body);
-            arena_reset(&ctx->arena);
-            ctx->header_state = HEADER_STATE_NONE;
-            ctx->reject_status = 0;
-            ctx->processing = 0;
-            ctx->expect_files = 0;
-            ctx->is_multipart = 0;
-
-            /* Освобождаем multipart-состояние целиком — при следующем
-             * keep-alive запросе оно будет создано заново при необходимости. */
-            mp_state_free(ctx->mp);
-            ctx->mp = NULL;
-
-            llhttp_init(&ctx->parser, HTTP_REQUEST, &g_settings);
-            ctx->parser.data = ctx;
-
-            if (ctx->pending.len > 0) {
-                char* pdata = ctx->pending.data;
-                size_t plen = ctx->pending.len;
-                ctx->pending.data = NULL;
-                ctx->pending.len = 0;
-                ctx->pending.cap = 0;
-                ctx->pending.arena_backed = 0;
-
-                enum llhttp_errno err = llhttp_execute(&ctx->parser, pdata, plen);
-                free(pdata);
-                if (err != HPE_OK) {
-                    const char* resp = (ctx->reject_status == 415) ? http_415 :
-                    (ctx->reject_status == 431) ? http_431 :
-                    (ctx->reject_status == 413) ? http_413 : http_400;
-                    send_response(&ctx->client, resp, strlen(resp), 0, MOJO_RESP_BORROWED);
-                    uv_read_stop((uv_stream_t*)client);
+            sendfile_next_chunk(ctx);
+        } else if (res == -UV_EAGAIN) {
+            if (st->retry_timer == NULL) {
+                st->retry_timer = (uv_timer_t*)malloc(sizeof(uv_timer_t));
+                if (st->retry_timer == NULL) {
+                    static_cleanup_and_finish(ctx, 0);
+                    return;
                 }
+                uv_timer_init(ctx->client.loop, st->retry_timer);
             }
+            st->retry_timer->data = ctx;
+            ctx->static_state = STATIC_STATE_RETRY_WAIT;
+            if (uv_timer_start(st->retry_timer, on_sendfile_retry_timer, SENDFILE_RETRY_MS, 0) != 0) {
+                static_cleanup_and_finish(ctx, 0);
+            }
+        } else {
+            static_cleanup_and_finish(ctx, 0);
+        }
+}
+
+static void on_static_headers_written(uv_write_t* req, int status) {
+    write_req_t* wr = (write_req_t*)req;
+    if (wr->free_data && wr->data != NULL) free(wr->data);
+    wr->data = NULL;
+    uv_tcp_t* client = wr->client;
+    wr_release(wr);
+
+    if (client == NULL) return;
+    client_ctx_t* ctx = (client_ctx_t*)client->data;
+    if (ctx == NULL || ctx->static_tx == NULL) return;
+
+    static_transfer_t* st = ctx->static_tx;
+    st->headers_writing = 0;
+
+    if (ctx->static_state == STATIC_STATE_ABORTING || uv_is_closing((uv_handle_t*)client)) {
+        static_finish_aborted(ctx);
+        return;
+    }
+
+    if (status != 0) {
+        static_cleanup_and_finish(ctx, 0);
+        return;
+    }
+
+    ctx->static_state = STATIC_STATE_SENDING_FILE;
+    sendfile_next_chunk(ctx);
+}
+
+/* Возвращает 1 если запрос обработан статикой, 0 если нужно отдать в Mojo-роутер */
+static int try_serve_static(client_ctx_t* ctx, const char* method, const char* url) {
+    int is_get = (strcmp(method, "GET") == 0);
+    int is_head = (strcmp(method, "HEAD") == 0);
+    if (!is_get && !is_head) return 0;
+
+    char resolved[PATH_MAX];
+    int rc = resolve_static_file(url, resolved, sizeof(resolved));
+    if (rc == 1) return 0; /* Не наш префикс */
+
+        if (rc == -2) {
+            send_response(&ctx->client, http_403, strlen(http_403), 0, MOJO_RESP_BORROWED);
+            if (g_log_level >= 1) log_request(method, url, 403, 0.0);
+            return 1;
+        }
+
+        int fd = -1;
+    struct stat st_buf;
+    if (rc == 0) {
+        fd = open(resolved, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0 && (fstat(fd, &st_buf) != 0 || !S_ISREG(st_buf.st_mode))) {
+            close(fd);
+            fd = -1;
         }
     }
 
-    static void on_write_c(uv_write_t* req, int status) {
-        finish_write((write_req_t*)req, status);
+    if (fd < 0) {
+        /* Если префикс "/", даём шанс динамическим роутам Mojo */
+        if (g_static.prefix_len == 1 && g_static.prefix[0] == '/') return 0;
+        send_response(&ctx->client, http_404, strlen(http_404), ctx->keep_alive, MOJO_RESP_BORROWED);
+        if (g_log_level >= 1) log_request(method, url, 404, 0.0);
+        return 1;
     }
 
-    static void send_response(uv_tcp_t* client, const char* response, size_t len,
-                              int keep_alive, int owned) {
-        if (client == NULL || uv_is_closing((uv_handle_t*)client)) {
-            if (owned == MOJO_RESP_OWNED && response != NULL) free((void*)response);
-            return;
-        }
-        if (response == NULL) {
-            response = http_500; len = strlen(http_500);
-            owned = MOJO_RESP_BORROWED; keep_alive = 0;
-        }
-        write_req_t* wr = wr_acquire();
-        if (!wr) {
-            if (owned == MOJO_RESP_OWNED && response != NULL) free((void*)response);
-            if (!uv_is_closing((uv_handle_t*)client))
-                uv_close((uv_handle_t*)client, on_close_c);
-            return;
-        }
-        wr->client = client;
-        wr->keep_alive = keep_alive;
-        wr->data = (char*)response;
-        wr->len = len;
-        wr->free_data = (owned == MOJO_RESP_OWNED) ? 1 : 0;
+    const char* mime = get_mime_type(resolved);
+    int64_t file_size = (int64_t)st_buf.st_size;
+    int keep_alive = ctx->keep_alive;
 
-        uv_buf_t buf = uv_buf_init(wr->data, (unsigned int)wr->len);
-        int rc = uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_c);
-        if (rc != 0) {
-            if (wr->free_data && wr->data != NULL) free(wr->data);
-            wr_release(wr);
-            if (!uv_is_closing((uv_handle_t*)client))
-                uv_close((uv_handle_t*)client, on_close_c);
-        }
+    char* hdr_buf = (char*)malloc(512);
+    if (hdr_buf == NULL) {
+        close(fd);
+        send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
+        return 1;
+    }
+
+    int hdr_len = snprintf(hdr_buf, 512,
+                            "HTTP/1.1 200 OK\r\n"
+                            "Content-Type: %s\r\n"
+                            "Content-Length: %lld\r\n"
+                            "Connection: %s\r\n"
+                            "\r\n",
+                            mime, (long long)file_size,
+                            keep_alive ? "keep-alive" : "close");
+    if (hdr_len <= 0 || hdr_len >= 512) {
+        free(hdr_buf);
+        close(fd);
+        send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
+        return 1;
+    }
+
+    /* Для HEAD или пустого файла sendfile не нужен */
+    if (is_head || file_size == 0) {
+        close(fd);
+        send_response(&ctx->client, hdr_buf, (size_t)hdr_len, keep_alive, MOJO_RESP_OWNED);
+        if (g_log_level >= 1) log_request(method, url, 200, 0.0);
+        return 1;
+    }
+
+    int sock_fd = -1;
+    if (uv_fileno((uv_handle_t*)&ctx->client, &sock_fd) != 0 || sock_fd < 0) {
+        free(hdr_buf);
+        close(fd);
+        send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
+        return 1;
+    }
+
+    static_transfer_t* st = (static_transfer_t*)calloc(1, sizeof(static_transfer_t));
+    write_req_t* wr = wr_acquire();
+    if (st == NULL || wr == NULL) {
+        free(st);
+        if (wr) wr_release(wr);
+        free(hdr_buf);
+        close(fd);
+        send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
+        return 1;
+    }
+
+    st->file_fd = fd;
+    st->sock_fd = sock_fd;
+    st->offset = 0;
+    st->file_size = file_size;
+    st->keep_alive = keep_alive;
+    st->headers_writing = 1;
+    if (g_log_level >= 1) clock_gettime(CLOCK_MONOTONIC, &st->start_ts);
+
+    ctx->processing = 1;
+    ctx->static_tx = st;
+    ctx->static_state = STATIC_STATE_SENDING_HEADERS;
+
+    wr->client = &ctx->client;
+    wr->data = hdr_buf;
+    wr->len = (size_t)hdr_len;
+    wr->keep_alive = keep_alive;
+    wr->free_data = 1;
+
+    uv_buf_t buf = uv_buf_init(wr->data, (unsigned int)wr->len);
+    int wrc = uv_write(&wr->req, (uv_stream_t*)&ctx->client, &buf, 1, on_static_headers_written);
+    if (wrc != 0) {
+        free(wr->data);
+        wr_release(wr);
+        st->headers_writing = 0;
+        static_cleanup_and_finish(ctx, 0);
+    }
+    return 1;
+}
+
+/* ================= write ================= */
+
+static void finish_write(write_req_t* wr, int status) {
+    if (wr->free_data && wr->data != NULL) free(wr->data);
+    wr->data = NULL;
+    uv_tcp_t* client = wr->client;
+    int keep_alive = wr->keep_alive;
+    wr_release(wr);
+
+    if (client == NULL || uv_is_closing((uv_handle_t*)client)) return;
+
+    client_ctx_t* ctx = (client_ctx_t*)client->data;
+    if (status != 0 || !keep_alive) {
+        uv_close((uv_handle_t*)client, on_close_c);
+        return;
+    }
+    if (ctx != NULL) {
+        reset_for_next_request(ctx);
+    }
+}
+
+static void on_write_c(uv_write_t* req, int status) {
+    finish_write((write_req_t*)req, status);
+}
+
+static void send_response(uv_tcp_t* client, const char* response, size_t len,
+                            int keep_alive, int owned) {
+    if (client == NULL || uv_is_closing((uv_handle_t*)client)) {
+        if (owned == MOJO_RESP_OWNED && response != NULL) free((void*)response);
+        return;
+    }
+    if (response == NULL) {
+        response = http_500; len = strlen(http_500);
+        owned = MOJO_RESP_BORROWED; keep_alive = 0;
+    }
+    write_req_t* wr = wr_acquire();
+    if (!wr) {
+        if (owned == MOJO_RESP_OWNED && response != NULL) free((void*)response);
+        if (!uv_is_closing((uv_handle_t*)client))
+            uv_close((uv_handle_t*)client, on_close_c);
+        return;
+    }
+    wr->client = client;
+    wr->keep_alive = keep_alive;
+    wr->data = (char*)response;
+    wr->len = len;
+    wr->free_data = (owned == MOJO_RESP_OWNED) ? 1 : 0;
+
+    uv_buf_t buf = uv_buf_init(wr->data, (unsigned int)wr->len);
+    int rc = uv_write(&wr->req, (uv_stream_t*)client, &buf, 1, on_write_c);
+    if (rc != 0) {
+        if (wr->free_data && wr->data != NULL) free(wr->data);
+        wr_release(wr);
+        if (!uv_is_closing((uv_handle_t*)client))
+            uv_close((uv_handle_t*)client, on_close_c);
+    }
 }
 
 static int extract_status_from_response(const char* response, size_t resp_len) {
@@ -1011,7 +1520,7 @@ static char* extract_boundary(const char* content_type) {
         while (*end != '\0' && *end != ';' && *end != '\r' &&
             *end != '\n' && *end != ' ') end++;
     }
-    size_t len = end - start;
+    size_t len = (size_t)(end - start);
     char* boundary = (char*)malloc(len + 1);
     if (boundary == NULL) return NULL;
     memcpy(boundary, start, len);
@@ -1184,14 +1693,20 @@ static int on_message_complete_c(llhttp_t* parser) {
         return 0;
     }
 
+    const char* method = llhttp_method_name((llhttp_method_t)parser->method);
+    const char* url = ctx->url.data ? ctx->url.data : "";
+
+    /* Попытка отдать статический файл напрямую через uv_fs_sendfile */
+    if (try_serve_static(ctx, method, url)) {
+        return 0;
+    }
+
     void* router = ctx->router ? ctx->router : global_router;
     if (router == NULL) {
         send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
         return 0;
     }
     ctx->processing = 1;
-    const char* method = llhttp_method_name((llhttp_method_t)parser->method);
-    const char* url = ctx->url.data ? ctx->url.data : "";
     const char* headers = ctx->headers.data ? ctx->headers.data : "";
     const char* body = ctx->body.data ? ctx->body.data : "";
 
@@ -1223,26 +1738,26 @@ static int on_message_complete_c(llhttp_t* parser) {
     char* response = mojo_handler(router, url, method, headers, body, &resp_len,
                                 &resp_owned, ctx->url.len, ctx->headers.len, ctx->body.len,
                                 form_arr, (size_t)form_count,
-                                file_arr, (size_t)file_count);
+                                    file_arr, (size_t)file_count);
 
-    double duration_ms = 0;
-    if (log_on) {
-        clock_gettime(CLOCK_MONOTONIC, &end);
-        duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
-        (end.tv_nsec - start.tv_nsec) / 1000000.0;
-    }
+                                double duration_ms = 0;
+                                if (log_on) {
+                                    clock_gettime(CLOCK_MONOTONIC, &end);
+                                    duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
+                                    (end.tv_nsec - start.tv_nsec) / 1000000.0;
+                                }
 
-    int status = 500;
-    int keep_alive = ctx->keep_alive;
-    if (response != NULL) {
-        if (resp_len == 0) resp_len = strlen(response);
-        status = extract_status_from_response(response, resp_len);
-        send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
-    } else {
-        send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
-    }
-    if (log_on) log_request(method, url, status, duration_ms);
-    return 0;
+                                int status = 500;
+                                int keep_alive = ctx->keep_alive;
+                                if (response != NULL) {
+                                    if (resp_len == 0) resp_len = strlen(response);
+                                    status = extract_status_from_response(response, resp_len);
+                                    send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
+                                } else {
+                                    send_response(&ctx->client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
+                                }
+                                if (log_on) log_request(method, url, status, duration_ms);
+                                return 0;
 }
 
 /* ================= read ================= */
@@ -1279,7 +1794,8 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
                 send_parse_error(ctx);
                 return;
             }
-            if (buf_append_arena(&ctx->pending, &ctx->arena, buf->base, (size_t)nread) != 0) {
+            /* pending всегда в heap, чтобы arena_reset не затёр данные */
+            if (buf_append_arena(&ctx->pending, NULL, buf->base, (size_t)nread) != 0) {
                 send_response((uv_tcp_t*)client, http_500, strlen(http_500), 0, MOJO_RESP_BORROWED);
                 uv_read_stop(client);
                 return;
@@ -1289,8 +1805,16 @@ static void on_read_c(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
             if (err != HPE_OK) send_parse_error(ctx);
         }
     } else if (nread < 0) {
-        if (!uv_is_closing((uv_handle_t*)client))
-            uv_close((uv_handle_t*)client, on_close_c);
+        client_ctx_t* ctx = (client_ctx_t*)client->data;
+        if (ctx != NULL && ctx->static_tx != NULL &&
+            (ctx->static_tx->in_flight || ctx->static_tx->headers_writing)) {
+            ctx->static_state = STATIC_STATE_ABORTING;
+        static_close_retry_timer(ctx->static_tx);
+        uv_read_stop(client);
+        return;
+            }
+            if (!uv_is_closing((uv_handle_t*)client))
+                uv_close((uv_handle_t*)client, on_close_c);
     }
 }
 
@@ -1304,8 +1828,15 @@ static void sweep_timeouts_c(uv_timer_t* timer) {
             client_ctx_t* c = g_timeout_heap.items[0];
             if (now - c->last_active_ms <= idle) break;
             heap_remove(c);
-            if (!uv_is_closing((uv_handle_t*)&c->client))
-                uv_close((uv_handle_t*)&c->client, on_close_c);
+            if (c->static_tx != NULL &&
+                (c->static_tx->in_flight || c->static_tx->headers_writing)) {
+                c->static_state = STATIC_STATE_ABORTING;
+            static_close_retry_timer(c->static_tx);
+            uv_read_stop((uv_stream_t*)&c->client);
+            continue;
+                }
+                if (!uv_is_closing((uv_handle_t*)&c->client))
+                    uv_close((uv_handle_t*)&c->client, on_close_c);
         }
     }
     if (g_request_timeout_ms > 0) {
@@ -1378,7 +1909,7 @@ static void on_connection_c(uv_stream_t* server, int status) {
     buf_init(&ctx->url); ctx->url.arena_backed = 1;
     buf_init(&ctx->headers); ctx->headers.arena_backed = 1;
     buf_init(&ctx->body); ctx->body.arena_backed = 1;
-    buf_init(&ctx->pending); ctx->pending.arena_backed = 1;
+    buf_init(&ctx->pending); ctx->pending.arena_backed = 0;
 
     ctx->header_state = HEADER_STATE_NONE;
     ctx->processing = 0;
@@ -1387,6 +1918,8 @@ static void on_connection_c(uv_stream_t* server, int status) {
     ctx->expect_files = 0;
     ctx->is_multipart = 0;
     ctx->mp = NULL;
+    ctx->static_state = STATIC_STATE_IDLE;
+    ctx->static_tx = NULL;
 
     llhttp_init(&ctx->parser, HTTP_REQUEST, &g_settings);
     ctx->parser.data = ctx;
@@ -1565,6 +2098,7 @@ void pthread_create_wrapper(int port, void* router, int num_threads) {
     detect_allowed_cpus();
     num_threads = resolve_thread_count(num_threads);
     freeze_upload_routes();
+    freeze_static_config();
     pthread_mutex_lock(&g_worker_mutex);
     g_worker_count = 0;
     pthread_mutex_unlock(&g_worker_mutex);

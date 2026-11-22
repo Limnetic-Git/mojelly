@@ -13,7 +13,7 @@ Thank you, Chris :)
 </p>
 
 <p align="center">
-  <a href="#"><img src="https://img.shields.io/badge/Mojo-1.1.0-blue.svg" alt="Mojo"></a>
+  <a href="#"><img src="https://img.shields.io/badge/Mojo-1.2.0-blue.svg" alt="Mojo"></a>
   <a href="#"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"></a>
   <a href="#"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg" alt="PRs"></a>
   <a href="#"><img src="https://img.shields.io/badge/Platform-Linux-lightgrey.svg" alt="Platform"></a>
@@ -76,6 +76,8 @@ openssl (not yet)
 pthread
 gcc compiler
 emberjson
+multipart parser by iafonov
+
 
 ## Mojelly's logo 🖼️
 **Mojelly's logo is a GRAPE! 🍇🍇🍇**
@@ -121,13 +123,15 @@ Normally is looks like that:
 ❯ bash build.sh 
 🔧 Using pixi environment...
 🔥 Using Mojo via pixi:
-Mojo 1.1.0 (ed45d567)
+Mojo 1.2.0 (2016d0cd)
 
 🔍 Checking C core...
 📦 libmojelly.a not found, building...
 🔨 Building C core with -O3...
+✅ bridge.o built
+✅ multipart_parser.o built
 ✅ libmojelly.a rebuilt!
--rw-r--r-- 1 limnetic limnetic 20610 сен  8 01:14 lib/libmojelly.a
+-rw-r--r-- 1 limnetic limnetic 96290 ноя 22 13:29 lib/libmojelly.a
 
 📢 Calling for server-code generator...
 🔧 Generating server code...
@@ -142,7 +146,7 @@ Mojo 1.1.0 (ed45d567)
    To run:
    ./server
 
-❯ ./server
+❯ MOJELLY_THREADS=4 MOJELLY_LOG_LEVEL=1 ./server
 🍇 Mojelly HTTP Server (Multithreaded)
 [C] ✅ All 4 threads created
 ✅ Worker threads started
@@ -151,8 +155,8 @@ Mojo 1.1.0 (ed45d567)
 [C] 🧵 Thread 3 listening on CPU 3 (port 8080)
 [C] 🧵 Thread 1 listening on CPU 1 (port 8080)
 [C] 🧵 Thread 0 listening on CPU 0 (port 8080)
-[03:38:52] [T0] GET / 200 0.01ms
-[03:38:54] [T1] GET /qwerty 404 0.00ms
+[13:31:44] [T0] GET / 200 0.01ms
+[13:31:46] [T1] GET /qwerty 404 0.00ms
 ```
 
 If you are interested, please ⭐ this project :)
