@@ -166,11 +166,13 @@ struct RouterHandlers:
 
     var patterns: List[CompiledPattern]
     var upload_routes: Dict[String, Bool]
+    var static_mounts: Dict[String, String]
 
     def __init__(out self):
         self.exact = Dict[String, Dict[String, Handler]]()
         self.patterns = List[CompiledPattern]()
         self.upload_routes = Dict[String, Bool]()
+        self.static_mounts = Dict[String, String]()
 
     def _insert_exact(
         mut self, method: String, path: String, handler: Handler
@@ -221,6 +223,17 @@ struct RouterHandlers:
 
     def is_upload_route(self, method: String, path: String) -> Bool:
         return (method + ":" + path) in self.upload_routes
+
+    def static(mut self, prefix: String, directory: String):
+        self.static_mounts[prefix] = directory
+
+    def get_static_dir(self, prefix: String) -> Optional[String]:
+        if prefix in self.static_mounts:
+            try:
+                return Optional[String](self.static_mounts[prefix])
+            except:
+                pass
+        return None
 
     def handle(self, mut request: HTTPRequest) -> HTTPResponse:
         var method = request.method

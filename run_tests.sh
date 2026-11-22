@@ -102,6 +102,15 @@ else
     FAILED_TESTS=$((FAILED_TESTS + 1))
 fi
 
+echo -e "${BLUE}--- Static Files Integration Suite ---${NC}"
+_kill_server
+if python3 tests/test_static_e2e.py; then
+    echo -e "${GREEN}✔ Static Files Suite passed${NC}\n"
+else
+    echo -e "${RED}✘ Static Files Suite failed${NC}\n"
+    FAILED_TESTS=$((FAILED_TESTS + 1))
+fi
+
 echo -e "${BLUE}=========================================="
 if [ $FAILED_TESTS -eq 0 ]; then
     echo -e "${GREEN}🎉 All test suites passed successfully! (100% Coverage)${NC}"

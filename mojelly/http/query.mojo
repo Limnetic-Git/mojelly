@@ -233,14 +233,14 @@ def parse_query_string(qs: String) -> Dict[String, String]:
             var val_raw = String(
                 StringSlice(unsafe_from_utf8=bytes[eq + 1 : pair_end])
             )
-            var key = url_decode(key_raw^)
+            var key = url_decode(key_raw)
             if key != "":
-                result[key] = url_decode(val_raw^)
+                result[key] = url_decode(val_raw)
         else:
             var key_raw = String(
                 StringSlice(unsafe_from_utf8=bytes[i:pair_end])
             )
-            var key = url_decode(key_raw^)
+            var key = url_decode(key_raw)
             if key != "":
                 result[key] = ""
 

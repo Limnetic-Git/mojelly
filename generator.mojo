@@ -440,6 +440,63 @@ def extract_handlers(user_code: String) -> Dict[String, String]:
     return routes^
 
 
+def _unquote_arg(raw: String) raises -> String:
+    var s = safe_strip(raw)
+    var bytes = s.as_bytes()
+    if len(bytes) >= 2 and (
+        (bytes[0] == 34 and bytes[len(bytes) - 1] == 34)
+        or (bytes[0] == 39 and bytes[len(bytes) - 1] == 39)
+    ):
+        return substring_range(s, 1, len(bytes) - 1)
+    return s
+
+
+def extract_static_mounts(user_code: String) raises -> Dict[String, String]:
+    var mounts = Dict[String, String]()
+    var pattern = "router.static("
+
+    for line_span in user_code.split("\n"):
+        var line = strip_source_comment(String(line_span))
+        var trimmed = safe_strip(line)
+        if trimmed == "" or pattern not in trimmed:
+            continue
+
+        var start = trimmed.find(pattern) + len(pattern.as_bytes())
+        var end = trimmed.rfind(")")
+        if start == -1 or end == -1 or start >= end:
+            continue
+
+        var args_str = substring_range(trimmed, start, end)
+        var args = split_top_level_arguments(args_str)
+        if len(args) >= 2:
+            var prefix = _unquote_arg(args[0])
+            var directory = _unquote_arg(args[1])
+            if prefix != "" and directory != "":
+                mounts[prefix] = directory
+
+    return mounts^
+
+
+def generate_static_code(mounts: Dict[String, String]) -> String:
+    var code = ""
+    for prefix in mounts.keys():
+        var directory = mounts.get(prefix, "")
+        if directory != "":
+            code += (
+                '    if mojelly_set_static_dir(string_to_c_string("'
+                + prefix
+                + '"), string_to_c_string("'
+                + directory
+                + '")) != 0:\n'
+                + '        print("⚠️ Failed to mount static dir:", "'
+                + prefix
+                + '", "->", "'
+                + directory
+                + '")\n'
+            )
+    return code
+
+
 struct ImportInfo:
     var module: String
     var symbols: List[String]
@@ -797,6 +854,14 @@ def generate_server(user_file: String) -> Optional[String]:
         print("   ", e)
         return None
 
+    var static_mounts: Dict[String, String]
+    try:
+        static_mounts = extract_static_mounts(user_code)
+    except e:
+        print("Error parsing static mounts:")
+        print("   ", e)
+        return None
+
     var base_dir = ""
     var slash_pos = user_file.rfind("/")
     if slash_pos != -1:
@@ -841,6 +906,7 @@ def generate_server(user_file: String) -> Optional[String]:
 
     var dto_wrappers_code = generate_dto_wrappers_code(routes, handler_dtos)
     var routes_code = generate_routes_code(routes, handler_dtos)
+    routes_code += generate_static_code(static_mounts)
     var json_import = String()
     if dto_wrappers_code != "":
         json_import = "from emberjson import try_from_json"
@@ -986,6 +1052,9 @@ def mojelly_set_router(router: C_void) -> None:
 
 def mojelly_register_upload_route(method: C_UInt8, path: C_UInt8) -> None:
     external_call["mojelly_register_upload_route", NoneType, C_UInt8, C_UInt8](method, path)
+
+def mojelly_set_static_dir(prefix: C_UInt8, directory: C_UInt8) -> Int32:
+    return external_call["mojelly_set_static_dir", Int32, C_UInt8, C_UInt8](prefix, directory)
 
 def pthread_create_wrapper(port: Int32, router: C_void, num_threads: Int32) -> None:
     external_call["pthread_create_wrapper", NoneType, Int32, C_void, Int32](port, router, num_threads)
