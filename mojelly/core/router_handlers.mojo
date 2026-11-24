@@ -91,20 +91,18 @@ def compile_pattern(
 
         if first == COLON:
             has_dynamic = True
-            var name = String()
-            for k in range(start + 1, i):
-                name += chr(Int(bytes[k]))
+            var name = String(
+                StringSlice(unsafe_from_utf8=bytes[start + 1 : i])
+            )
             segs.append(Segment(is_param=True, is_wildcard=False, name=name^))
         elif first == STAR:
             has_dynamic = True
-            var name = String()
-            for k in range(start + 1, i):
-                name += chr(Int(bytes[k]))
+            var name = String(
+                StringSlice(unsafe_from_utf8=bytes[start + 1 : i])
+            )
             segs.append(Segment(is_param=True, is_wildcard=True, name=name^))
         else:
-            var lit = String()
-            for k in range(start, i):
-                lit += chr(Int(bytes[k]))
+            var lit = String(StringSlice(unsafe_from_utf8=bytes[start:i]))
             segs.append(Segment(is_param=False, is_wildcard=False, name=lit^))
 
     if not has_dynamic:
@@ -130,6 +128,22 @@ def match_compiled(
         if url_n != n:
             return None
 
+    # Сначала проверяем все литеральные сегменты без аллокации Dict
+    for i in range(n):
+        ref seg = cp.segments[i]
+        if seg.is_wildcard:
+            break
+        if not seg.is_param:
+            var bounds = url_segs[i]
+            var s = bounds[0]
+            var e = bounds[1]
+            var lit_bytes = seg.name.as_bytes()
+            if len(lit_bytes) != (e - s):
+                return None
+            for k in range(len(lit_bytes)):
+                if lit_bytes[k] != bytes[s + k]:
+                    return None
+
     var params = Dict[String, String]()
 
     for i in range(n):
@@ -139,30 +153,25 @@ def match_compiled(
         var e = bounds[1]
 
         if seg.is_wildcard:
-            var val = String()
-            for k in range(s, total):
-                val += chr(Int(bytes[k]))
-            params[seg.name] = val^
+            params[seg.name] = String(
+                StringSlice(unsafe_from_utf8=bytes[s:total])
+            )
             break
-
         if seg.is_param:
-            var val = String()
-            for k in range(s, e):
-                val += chr(Int(bytes[k]))
-            params[seg.name] = val^
-        else:
-            var lit_bytes = seg.name.as_bytes()
-            if len(lit_bytes) != (e - s):
-                return None
-            for k in range(len(lit_bytes)):
-                if lit_bytes[k] != bytes[s + k]:
-                    return None
+            params[seg.name] = String(
+                StringSlice(unsafe_from_utf8=bytes[s:e])
+            )
 
     return Optional[Dict[String, String]](params^)
 
 
 struct RouterHandlers:
     var exact: Dict[String, Dict[String, Handler]]
+    var _exact_get: Dict[String, Handler]
+    var _exact_post: Dict[String, Handler]
+    var _exact_put: Dict[String, Handler]
+    var _exact_delete: Dict[String, Handler]
+    var _exact_patch: Dict[String, Handler]
 
     var patterns: List[CompiledPattern]
     var upload_routes: Dict[String, Bool]
@@ -170,6 +179,11 @@ struct RouterHandlers:
 
     def __init__(out self):
         self.exact = Dict[String, Dict[String, Handler]]()
+        self._exact_get = Dict[String, Handler]()
+        self._exact_post = Dict[String, Handler]()
+        self._exact_put = Dict[String, Handler]()
+        self._exact_delete = Dict[String, Handler]()
+        self._exact_patch = Dict[String, Handler]()
         self.patterns = List[CompiledPattern]()
         self.upload_routes = Dict[String, Bool]()
         self.static_mounts = Dict[String, String]()
@@ -184,14 +198,23 @@ struct RouterHandlers:
         self, method: String, path: String
     ) raises -> Optional[Handler]:
         ref bucket = self.exact[method]
-        if path in bucket:
-            return bucket[path]
-        return None
+        return bucket.get(path)
 
     def add(mut self, var method: String, var path: String, handler: Handler):
         var compiled = compile_pattern(path, handler, method)
 
         if not compiled:
+            if method == "GET":
+                self._exact_get[path] = handler
+            elif method == "POST":
+                self._exact_post[path] = handler
+            elif method == "PUT":
+                self._exact_put[path] = handler
+            elif method == "DELETE":
+                self._exact_delete[path] = handler
+            elif method == "PATCH":
+                self._exact_patch[path] = handler
+
             if method not in self.exact:
                 self.exact[method] = Dict[String, Handler]()
             try:
@@ -228,23 +251,42 @@ struct RouterHandlers:
         self.static_mounts[prefix] = directory
 
     def get_static_dir(self, prefix: String) -> Optional[String]:
-        if prefix in self.static_mounts:
-            try:
-                return Optional[String](self.static_mounts[prefix])
-            except:
-                pass
-        return None
+        return self.static_mounts.get(prefix)
 
     def handle(self, mut request: HTTPRequest) -> HTTPResponse:
-        var method = request.method
-        var path = request.path
-        if method in self.exact:
+        ref method = request.method
+        ref path = request.path
+
+        if method == "GET":
+            var h = self._exact_get.get(path)
+            if h:
+                return h.value()(request)
+        elif method == "POST":
+            var h = self._exact_post.get(path)
+            if h:
+                return h.value()(request)
+        elif method == "PUT":
+            var h = self._exact_put.get(path)
+            if h:
+                return h.value()(request)
+        elif method == "DELETE":
+            var h = self._exact_delete.get(path)
+            if h:
+                return h.value()(request)
+        elif method == "PATCH":
+            var h = self._exact_patch.get(path)
+            if h:
+                return h.value()(request)
+        elif method in self.exact:
             try:
                 var h = self._lookup_exact(method, path)
                 if h:
                     return h.value()(request)
             except:
                 pass
+
+        if len(self.patterns) == 0:
+            return HTTPResponse(404, "Not Found")
 
         var url_segs = split_segments(path)
         var n = len(url_segs)

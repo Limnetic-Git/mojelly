@@ -86,6 +86,7 @@ static _Thread_local int current_thread_id = -1;
 #define SENDFILE_RETRY_MS 1
 #define STATIC_SMALL_FILE_MAX (32 * 1024)
 #define STATIC_HDR_MAX 512
+#define RESP_SCRATCH_SIZE 65536
 
 static size_t g_max_header_size = 64UL << 10;
 static size_t g_max_body_size = 10UL << 20;
@@ -232,6 +233,9 @@ static void freeze_upload_routes(void) {
 
 #define MOJO_RESP_OWNED 0
 #define MOJO_RESP_BORROWED 1
+#define MOJO_RESP_SCRATCH 2
+
+static _Thread_local char tl_resp_buf[RESP_SCRATCH_SIZE];
 
 /* 2.3: struct layouts must match Mojo structs exactly. */
 typedef struct {
@@ -251,9 +255,11 @@ typedef struct {
 extern char *mojo_handler(void *router, const char *url, const char *method,
                           const char *headers, const char *body,
                           size_t *out_len, int *out_ownership, size_t url_len,
-                          size_t headers_len, size_t body_len,
-                          c_form_field_t *form, size_t form_count,
-                          c_file_part_t *files, size_t file_count);
+                          size_t method_len, size_t headers_len,
+                          size_t body_len, int keep_alive, char *scratch_buf,
+                          size_t scratch_cap, c_form_field_t *form,
+                          size_t form_count, c_file_part_t *files,
+                          size_t file_count);
 
 static void *global_router = NULL;
 void mojelly_set_router(void *router) { global_router = router; }
@@ -325,9 +331,6 @@ static inline void buf_reset(buffer_t *b) {
     b->data[0] = '\0';
 }
 
-/* Безопасный сброс буфера перед arena_reset(): предотвращает алиасинг
- * указателей в арене и освобождает heap-буфер, если прошлый запрос вырос за
- * арену. */
 static inline void buf_reset_arena(buffer_t *b) {
   if (UNLIKELY(!b->arena_backed && b->data != NULL))
     free(b->data);
@@ -348,7 +351,6 @@ static int buf_reserve_arena_hint(buffer_t *b, arena_t *a, size_t need,
     new_cap *= 2;
   }
   if (b->arena_backed && a != NULL && new_cap <= ARENA_MAX_SIZE) {
-    /* Быстрый путь: расширение in-place, если буфер на вершине арены */
     if (b->data != NULL && a->base != NULL &&
         b->data + b->cap == a->base + a->used) {
       size_t base_off = (size_t)(b->data - a->base);
@@ -464,8 +466,6 @@ typedef struct {
   size_t size;
 } mp_file_part_t;
 
-/* Все multipart-поля в одной структуре.
- * Аллоцируется только когда запрос реально multipart. */
 typedef struct {
   multipart_parser *parser;
   char *boundary;
@@ -511,7 +511,6 @@ typedef struct client_ctx {
   struct client_ctx *prev;
   struct client_ctx *next;
 
-  /* O(1) интрузивный LRU-список idle-таймаутов */
   int idle_linked;
   struct client_ctx *idle_prev;
   struct client_ctx *idle_next;
@@ -521,13 +520,12 @@ typedef struct client_ctx {
   int expect_files;
   int is_multipart;
 
-  multipart_state_t *mp; /* NULL для non-multipart */
+  multipart_state_t *mp;
 
   static_state_t static_state;
-  static_transfer_t *static_tx; /* NULL для non-static */
+  static_transfer_t *static_tx;
 } client_ctx_t;
 
-/* Thread-local слэб контекстов с сохранением выделенной арены */
 static _Thread_local client_ctx_t *tl_ctx_slab[CTX_SLAB_MAX];
 static _Thread_local int tl_ctx_slab_len = 0;
 
@@ -661,8 +659,6 @@ static void ctx_free(client_ctx_t *c) {
   buf_free(&c->pending);
 
   if (LIKELY(tl_ctx_slab_len < CTX_SLAB_MAX)) {
-    /* Оставляем arena.base в слэбе, чтобы не делать malloc/free 32KB на каждый
-     * accept */
     arena_reset(&c->arena);
     tl_ctx_slab[tl_ctx_slab_len++] = c;
     return;
@@ -684,7 +680,7 @@ static void ctx_slab_destroy_tl(void) {
 typedef struct {
   uv_write_t req;
   uv_tcp_t *client;
-  char *data; /* оригинальный указатель для free() при free_data == 1 */
+  char *data;
   size_t len;
   int keep_alive;
   int free_data;
@@ -724,8 +720,8 @@ static void wr_pool_destroy_tl(void) {
 
 /* ================= O(1) Idle LRU list ================= */
 
-static _Thread_local client_ctx_t *tl_idle_head = NULL; /* самые старые */
-static _Thread_local client_ctx_t *tl_idle_tail = NULL; /* самые свежие */
+static _Thread_local client_ctx_t *tl_idle_head = NULL;
+static _Thread_local client_ctx_t *tl_idle_tail = NULL;
 
 static inline void idle_push(client_ctx_t *c) {
   if (UNLIKELY(c->idle_linked))
@@ -766,7 +762,6 @@ static inline void idle_touch(client_ctx_t *c, uint64_t now) {
   }
   if (c == tl_idle_tail)
     return;
-  /* Переносим в хвост за O(1) */
   if (c->idle_prev)
     c->idle_prev->idle_next = c->idle_next;
   else
@@ -792,8 +787,6 @@ static int on_body_c(llhttp_t *parser, const char *at, size_t length);
 static int on_message_complete_c(llhttp_t *parser);
 
 static void mojelly_init_settings(void) {
-  /* sendfile(2) на закрытом сокете шлёт SIGPIPE — игнорируем, обрабатываем
-   * EPIPE */
   signal(SIGPIPE, SIG_IGN);
 
   const char *lvl = getenv("MOJELLY_LOG_LEVEL");
@@ -997,7 +990,6 @@ static void on_close_c(uv_handle_t *handle) {
     ctx->static_state = STATIC_STATE_ABORTING;
     st->ctx_closing = 1;
     if (st->in_flight || st->headers_writing) {
-      /* Откладываем ctx_free до завершения async callback'а */
       return;
     }
     static_transfer_free(st);
@@ -1035,7 +1027,7 @@ static int url_decode_path(const char *src, size_t src_len, char *dst,
         return -1;
       unsigned char decoded = (unsigned char)((hi << 4) | lo);
       if (decoded == 0)
-        return -1; /* Запрещаем NUL-байт */
+        return -1;
       c = (char)decoded;
       i += 2;
     }
@@ -1145,12 +1137,6 @@ static const char *get_mime_type(const char *path) {
   return "application/octet-stream";
 }
 
-/* Возвращает:
- *   0 — файл открыт (fd записан в *out_fd, путь для MIME в out_mime_path)
- *   1 — не совпадает с префиксом (прокинуть в Mojo-роутер)
- *  -1 — файл не найден / директория
- *  -2 — попытка path traversal или невалидный URL
- */
 static int open_static_file(const char *url, int *out_fd, struct stat *out_st,
                             char *out_mime_path, size_t out_mime_sz) {
   *out_fd = -1;
@@ -1213,7 +1199,6 @@ static int open_static_file(const char *url, int *out_fd, struct stat *out_st,
     int err = errno;
     if (err == ENOSYS) {
       __atomic_store_n(&g_openat2_unsupported, 1, __ATOMIC_RELAXED);
-      /* fall through к realpath */
     } else if (err == EXDEV) {
       return -2;
     } else {
@@ -1421,8 +1406,6 @@ static void on_static_headers_written(uv_write_t *req, int status) {
   sendfile_next_chunk(ctx);
 }
 
-/* Возвращает 1 если запрос обработан статикой, 0 если нужно отдать в
- * Mojo-роутер */
 static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
                                      const char *method, const char *url) {
   int fd = -1;
@@ -1430,7 +1413,7 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
   char mime_path[PATH_MAX];
   int rc = open_static_file(url, &fd, &st_buf, mime_path, sizeof(mime_path));
   if (rc == 1)
-    return 0; /* Не наш префикс */
+    return 0;
 
   if (rc == -2) {
     if (UNLIKELY(g_log_level >= 1))
@@ -1441,7 +1424,6 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
   }
 
   if (fd < 0) {
-    /* Если префикс "/", даём шанс динамическим роутам Mojo */
     if (g_static.prefix_len == 1 && g_static.prefix[0] == '/')
       return 0;
     if (UNLIKELY(g_log_level >= 1))
@@ -1455,9 +1437,6 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
   int64_t file_size = (int64_t)st_buf.st_size;
   int keep_alive = ctx->keep_alive;
 
-  /* Быстрый путь для HEAD, пустых файлов и мелких файлов (<= 32KB):
-   * один _Thread_local буфер + один uv_try_write (один TCP-пакет, без
-   * malloc/sendfile). */
   if (is_head || file_size <= STATIC_SMALL_FILE_MAX) {
     static _Thread_local char small_buf[STATIC_HDR_MAX + STATIC_SMALL_FILE_MAX];
     int hdr_len = snprintf(small_buf, STATIC_HDR_MAX,
@@ -1505,35 +1484,11 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
 
     if (UNLIKELY(g_log_level >= 1))
       log_request(method, url, 200, 0.0);
-
-    uv_buf_t ubuf = uv_buf_init(small_buf, (unsigned int)total_len);
-    int written = uv_try_write((uv_stream_t *)&ctx->client, &ubuf, 1);
-    if (LIKELY(written == (int)total_len)) {
-      if (!keep_alive) {
-        uv_close((uv_handle_t *)&ctx->client, on_close_c);
-      } else {
-        reset_request_state_inline(ctx);
-      }
-      return 1;
-    }
-    if (written < 0 && written != UV_EAGAIN && written != UV_ENOSYS) {
-      uv_close((uv_handle_t *)&ctx->client, on_close_c);
-      return 1;
-    }
-    /* Fallback на async uv_write только для недописанного хвоста */
-    size_t off = (written > 0) ? (size_t)written : 0;
-    size_t rem = total_len - off;
-    char *heap_rem = (char *)malloc(rem);
-    if (heap_rem == NULL) {
-      uv_close((uv_handle_t *)&ctx->client, on_close_c);
-      return 1;
-    }
-    memcpy(heap_rem, small_buf + off, rem);
-    send_response(&ctx->client, heap_rem, rem, keep_alive, MOJO_RESP_OWNED);
+    send_response(&ctx->client, small_buf, total_len, keep_alive,
+                  MOJO_RESP_SCRATCH);
     return 1;
   }
 
-  /* Крупные файлы: TCP_CORK + заголовки + uv_fs_sendfile */
   int sock_fd = -1;
   if (uv_fileno((uv_handle_t *)&ctx->client, &sock_fd) != 0 || sock_fd < 0) {
     close(fd);
@@ -1593,7 +1548,6 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
   ctx->processing = 1;
   ctx->static_tx = st;
 
-  /* Пробуем отправить заголовки синхронно через uv_try_write */
   uv_buf_t hbuf = uv_buf_init(hdr_stack, (unsigned int)hdr_len);
   int written = uv_try_write((uv_stream_t *)&ctx->client, &hbuf, 1);
   if (LIKELY(written == hdr_len)) {
@@ -1683,12 +1637,10 @@ static void send_response(uv_tcp_t *client, const char *response, size_t len,
 
   client_ctx_t *ctx = (client_ctx_t *)client->data;
 
-  /* Быстрый путь: синхронная запись без аллокации write_req_t и лишнего тика
-   * event loop */
   uv_buf_t buf = uv_buf_init((char *)response, (unsigned int)len);
   int written = uv_try_write((uv_stream_t *)client, &buf, 1);
 
-  if (LIKELY(written == (int)len)) {
+  if (LIKELY(written >= 0 && (size_t)written == len)) {
     if (owned == MOJO_RESP_OWNED)
       free((void *)response);
     if (!keep_alive) {
@@ -1706,8 +1658,8 @@ static void send_response(uv_tcp_t *client, const char *response, size_t len,
     return;
   }
 
-  /* Fallback на асинхронный uv_write для остатка */
   size_t off = (written > 0) ? (size_t)written : 0;
+  size_t rem = len - off;
   write_req_t *wr = wr_acquire();
   if (UNLIKELY(!wr)) {
     if (owned == MOJO_RESP_OWNED)
@@ -1717,16 +1669,31 @@ static void send_response(uv_tcp_t *client, const char *response, size_t len,
     return;
   }
 
+  char *write_ptr = (char *)response + off;
+  if (owned == MOJO_RESP_SCRATCH) {
+    char *heap_rem = (char *)malloc(rem);
+    if (UNLIKELY(!heap_rem)) {
+      wr_release(wr);
+      if (!uv_is_closing((uv_handle_t *)client))
+        uv_close((uv_handle_t *)client, on_close_c);
+      return;
+    }
+    memcpy(heap_rem, write_ptr, rem);
+    wr->data = heap_rem;
+    wr->free_data = 1;
+    write_ptr = heap_rem;
+  } else {
+    wr->data = (char *)response;
+    wr->free_data = (owned == MOJO_RESP_OWNED) ? 1 : 0;
+  }
+
   if (ctx != NULL)
     ctx->processing = 1;
   wr->client = client;
   wr->keep_alive = keep_alive;
-  wr->data = (char *)response; /* оригинальный указатель для free() */
-  wr->len = len - off;
-  wr->free_data = (owned == MOJO_RESP_OWNED) ? 1 : 0;
+  wr->len = rem;
 
-  uv_buf_t rem_buf =
-      uv_buf_init((char *)response + off, (unsigned int)(len - off));
+  uv_buf_t rem_buf = uv_buf_init(write_ptr, (unsigned int)rem);
   int rc = uv_write(&wr->req, (uv_stream_t *)client, &rem_buf, 1, on_write_c);
   if (UNLIKELY(rc != 0)) {
     if (wr->free_data && wr->data != NULL)
@@ -1894,7 +1861,6 @@ static int mp_on_part_data(multipart_parser *p, const char *at, size_t length) {
       strncpy(mp->temp_path, tmpl, sizeof(mp->temp_path) - 1);
       mp->temp_path[sizeof(mp->temp_path) - 1] = '\0';
     }
-    /* Payload too large: total body first, then per-file. */
     if (mp->total_size + length > g_max_body_size) {
       mp->error = 1;
       ctx->reject_status = 413;
@@ -2236,12 +2202,32 @@ static int on_body_c(llhttp_t *parser, const char *at, size_t length) {
   return buf_append_arena(&ctx->body, &ctx->arena, at, length);
 }
 
-/* Вынесено из горячего стека on_message_complete_c, чтобы не аллоцировать
- * 6.4 KB массивов form_arr/file_arr на каждом обычном запросе. */
+static inline size_t http_method_len(uint8_t m, const char *name) {
+  switch (m) {
+  case HTTP_GET:
+    return 3;
+  case HTTP_POST:
+    return 4;
+  case HTTP_PUT:
+    return 3;
+  case HTTP_DELETE:
+    return 6;
+  case HTTP_PATCH:
+    return 5;
+  case HTTP_HEAD:
+    return 4;
+  case HTTP_OPTIONS:
+    return 7;
+  default:
+    return strlen(name);
+  }
+}
+
 static NOINLINE char *
 call_mojo_with_multipart(void *router, client_ctx_t *ctx, const char *url,
-                         const char *method, const char *headers,
-                         const char *body, size_t *resp_len, int *resp_owned) {
+                         const char *method, size_t method_len,
+                         const char *headers, const char *body,
+                         size_t *resp_len, int *resp_owned) {
   int form_count = ctx->mp->form_count;
   int file_count = ctx->mp->file_count;
 
@@ -2261,7 +2247,8 @@ call_mojo_with_multipart(void *router, client_ctx_t *ctx, const char *url,
   }
 
   return mojo_handler(router, url, method, headers, body, resp_len, resp_owned,
-                      ctx->url.len, ctx->headers.len, ctx->body.len, form_arr,
+                      ctx->url.len, method_len, ctx->headers.len, ctx->body.len,
+                      ctx->keep_alive, tl_resp_buf, RESP_SCRATCH_SIZE, form_arr,
                       (size_t)form_count, file_arr, (size_t)file_count);
 }
 
@@ -2277,8 +2264,6 @@ static int on_message_complete_c(llhttp_t *parser) {
   const char *method = llhttp_method_name((llhttp_method_t)parser->method);
   const char *url = ctx->url.data ? ctx->url.data : "";
 
-  /* Попытка отдать статический файл напрямую (без лишнего входа, если статика
-   * выключена) */
   if (UNLIKELY(__atomic_load_n(&g_static.enabled, __ATOMIC_RELAXED)) &&
       (parser->method == HTTP_GET || parser->method == HTTP_HEAD)) {
     if (try_serve_static(ctx, parser->method == HTTP_HEAD, method, url)) {
@@ -2297,6 +2282,7 @@ static int on_message_complete_c(llhttp_t *parser) {
 
   const char *headers = ctx->headers.data ? ctx->headers.data : "";
   const char *body = ctx->body.data ? ctx->body.data : "";
+  size_t method_len = http_method_len(parser->method, method);
 
   struct timespec start, end;
   int log_on = g_log_level >= 1;
@@ -2307,12 +2293,13 @@ static int on_message_complete_c(llhttp_t *parser) {
   int resp_owned = MOJO_RESP_OWNED;
   char *response;
   if (UNLIKELY(ctx->mp != NULL)) {
-    response = call_mojo_with_multipart(router, ctx, url, method, headers, body,
-                                        &resp_len, &resp_owned);
+    response = call_mojo_with_multipart(router, ctx, url, method, method_len,
+                                        headers, body, &resp_len, &resp_owned);
   } else {
     response = mojo_handler(router, url, method, headers, body, &resp_len,
-                            &resp_owned, ctx->url.len, ctx->headers.len,
-                            ctx->body.len, NULL, 0, NULL, 0);
+                            &resp_owned, ctx->url.len, method_len,
+                            ctx->headers.len, ctx->body.len, ctx->keep_alive,
+                            tl_resp_buf, RESP_SCRATCH_SIZE, NULL, 0, NULL, 0);
   }
 
   double duration_ms = 0.0;
@@ -2338,9 +2325,6 @@ static int on_message_complete_c(llhttp_t *parser) {
                   MOJO_RESP_BORROWED);
   }
 
-  /* Если запись ушла в async или соединение закрыто — ставим llhttp на паузу,
-   * чтобы не потерять и не испортить возможные pipelined-запросы в хвосте
-   * буфера. */
   return (ctx->processing || uv_is_closing((uv_handle_t *)&ctx->client))
              ? HPE_PAUSED
              : 0;
@@ -2420,7 +2404,6 @@ static void on_read_c(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf) {
         send_parse_error(ctx);
         return;
       }
-      /* pending всегда в heap, чтобы arena_reset не затёр данные */
       if (buf_append_arena(&ctx->pending, NULL, buf->base, (size_t)nread) !=
           0) {
         uv_read_stop(client);
@@ -2588,25 +2571,27 @@ static void on_connection_c(uv_stream_t *server, int status) {
 /* ================= server socket ================= */
 
 static int create_bound_socket(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    #ifdef SO_REUSEPORT
-    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-    #endif
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons((uint16_t)port);
-    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "[C] bind port %d failed: %s\n", port, strerror(errno));
-        close(fd);
-        return -1;
-    }
-    return fd;
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0)
+    return -1;
+  int opt = 1;
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+#ifdef SO_REUSEPORT
+  setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+#endif
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = INADDR_ANY;
+  addr.sin_port = htons((uint16_t)port);
+  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    fprintf(stderr, "[C] bind port %d failed: %s\n", port, strerror(errno));
+    close(fd);
+    return -1;
+  }
+  return fd;
 }
+
 /* ================= thread ================= */
 
 static int allowed_cpus[CPU_SETSIZE];

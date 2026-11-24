@@ -1,4 +1,5 @@
 from mojelly.http.query import QueryParams, parse_query_string
+from std.memory import Pointer
 
 comptime _SP: UInt8 = 32
 comptime _TAB: UInt8 = 9
@@ -20,8 +21,9 @@ def _slice_to_string(bytes: Span[UInt8, _], start: Int, end: Int) -> String:
     return String(StringSlice(unsafe_from_utf8=bytes[s:e]))
 
 
-def parse_header_block(raw: String, mut headers: Dict[String, String]):
-    var bytes = raw.as_bytes()
+def parse_header_bytes(
+    bytes: Span[UInt8, _], mut headers: Dict[String, String]
+):
     var n = len(bytes)
     var i = 0
     while i < n:
@@ -36,6 +38,10 @@ def parse_header_block(raw: String, mut headers: Dict[String, String]):
                 bytes, colon + 1, line_end
             )
         i = line_end + 2
+
+
+def parse_header_block(raw: String, mut headers: Dict[String, String]):
+    parse_header_bytes(raw.as_bytes(), headers)
 
 
 def parse_cookie_header(raw: String, mut cookies: Dict[String, String]):
@@ -112,14 +118,14 @@ struct HTTPRequest:
     var body: String
 
     var _headers_raw: String
+    var _headers_ptr: Optional[Pointer[UInt8, MutUntrackedOrigin]]
+    var _headers_len: Int
 
     var _headers_cache: Optional[Dict[String, String]]
     var _cookies_cache: Optional[Dict[String, String]]
     var query: QueryParams
     var params: Dict[String, String]
 
-    # MULTIPART: None for non-multipart requests (the common case).
-    # Only allocated when the C layer actually parsed a multipart body.
     var multipart: Optional[MultipartData]
 
     def __init__(
@@ -139,23 +145,30 @@ struct HTTPRequest:
                 self.query_string = String(
                     url[byte = q_pos + 1 : len(url.as_bytes())]
                 )
+                self.query = QueryParams(self.query_string)
             else:
                 self.path = url
                 self.query_string = ""
+                self.query = QueryParams()
         else:
             self.path = path
             self.query_string = query_string
+            if query_string != "":
+                self.query = QueryParams(query_string)
+            else:
+                self.query = QueryParams()
 
-        self.query = QueryParams(self.query_string.copy())
         self.method = method
         self.body = ""
         self._headers_raw = headers_raw
+        self._headers_ptr = None
+        self._headers_len = 0
         self._headers_cache = None
         self._cookies_cache = None
         self.params = Dict[String, String]()
         self.multipart = None
 
-    # ---- Headers (lazy) ----
+    # ---- Headers (lazy, zero-copy from C arena until first access) ----
 
     def get_header(mut self, name: String) -> String:
         self._ensure_headers()
@@ -179,7 +192,14 @@ struct HTTPRequest:
     def _ensure_headers(mut self):
         if not self._headers_cache:
             var d = Dict[String, String]()
-            parse_header_block(self._headers_raw, d)
+            if self._headers_ptr and self._headers_len > 0:
+                var span = Span[UInt8](
+                    unsafe_ptr=self._headers_ptr.value(),
+                    length=self._headers_len,
+                )
+                parse_header_bytes(span, d)
+            elif len(self._headers_raw.as_bytes()) > 0:
+                parse_header_bytes(self._headers_raw.as_bytes(), d)
             self._headers_cache = d^
 
     # ---- Cookies (lazy, read via Cookie header) ----
@@ -224,7 +244,7 @@ struct HTTPRequest:
     def has_query(mut self, name: String) -> Bool:
         return self.query.has(name)
 
-    # ---- Path params (no lazy — the router fills them only on match) ----
+    # ---- Path params ----
 
     def get_param(self, name: String) -> String:
         return self.params.get(name, "")
@@ -232,7 +252,7 @@ struct HTTPRequest:
     def has_param(self, name: String) -> Bool:
         return name in self.params
 
-    # ---- Multipart (populated by the C layer for multipart/form-data) ----
+    # ---- Multipart ----
 
     def has_multipart(self) -> Bool:
         return self.multipart is not None

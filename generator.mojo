@@ -964,7 +964,7 @@ ROUTES_PLACEHOLDER
 # ============================================================
 
 from mojelly.http.request import HTTPRequest, MultipartData, FilePart
-from mojelly.http.response import HTTPResponse, get_status_phrase, _has_crlf, _strip_crlf
+from mojelly.http.response import HTTPResponse, get_status_phrase, _has_crlf
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
 from std.memory import Pointer
@@ -1090,6 +1090,55 @@ def string_to_c_string(s: String) -> C_UInt8:
     ptr.unsafe_offset(len).unsafe_write(0)
     return ptr
 
+def _write_span(dst: C_UInt8, mut pos: Int, bytes: Span[UInt8, _]):
+    var n = len(bytes)
+    if n == 0:
+        return
+    _ = external_call["memcpy", C_UInt8, C_UInt8, C_UInt8, UInt64](
+        dst.unsafe_offset(pos),
+        bytes.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutUntrackedOrigin](),
+        UInt64(n),
+    )
+    pos += n
+
+def _write_str(dst: C_UInt8, mut pos: Int, s: String):
+    _write_span(dst, pos, s.as_bytes())
+
+def _write_str_no_crlf(dst: C_UInt8, mut pos: Int, s: String):
+    if not _has_crlf(s):
+        _write_span(dst, pos, s.as_bytes())
+        return
+    var bytes = s.as_bytes()
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if b != 13 and b != 10:
+            dst.unsafe_offset(pos).unsafe_write(b)
+            pos += 1
+
+def _write_uint(dst: C_UInt8, mut pos: Int, value: Int):
+    if value == 0:
+        dst.unsafe_offset(pos).unsafe_write(UInt8(48))
+        pos += 1
+        return
+    var v = value
+    if v < 0:
+        dst.unsafe_offset(pos).unsafe_write(UInt8(45))
+        pos += 1
+        v = -v
+    var start = pos
+    while v > 0:
+        dst.unsafe_offset(pos).unsafe_write(UInt8(48 + (v % 10)))
+        pos += 1
+        v //= 10
+    var l = start
+    var r = pos - 1
+    while l < r:
+        var tmp = dst.unsafe_offset(l)[]
+        dst.unsafe_offset(l).unsafe_write(dst.unsafe_offset(r)[])
+        dst.unsafe_offset(r).unsafe_write(tmp)
+        l += 1
+        r -= 1
+
 # ============================================================
 # MULTIPART (FFI-array, no JSON)
 # ============================================================
@@ -1136,57 +1185,104 @@ def mojo_handler(
     out_len: Pointer[UInt64, MutUntrackedOrigin],
     out_ownership: Pointer[Int32, MutUntrackedOrigin],
     url_len: UInt64,
+    method_len: UInt64,
     headers_len: UInt64,
     body_len: UInt64,
+    keep_alive: Int32,
+    scratch_ptr: C_UInt8,
+    scratch_cap: UInt64,
     form_ptr: Pointer[CFormField, MutUntrackedOrigin],
     form_count: UInt64,
     files_ptr: Pointer[CFilePart, MutUntrackedOrigin],
     file_count: UInt64
 ) abi("C") -> C_UInt8:
-    out_ownership[] = 0
-
     if not router_ptr:
-        var err_response = "HTTP/1.1 500 Internal Server Error\\r\\n\\r\\n"
-        out_len[] = UInt64(err_response.byte_length())
+        var err_response = "HTTP/1.1 500 Internal Server Error\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n"
+        var err_len = err_response.byte_length()
+        out_len[] = UInt64(err_len)
+        if UInt64(err_len) <= scratch_cap:
+            var pos = 0
+            _write_str(scratch_ptr, pos, err_response)
+            out_ownership[] = 2
+            return scratch_ptr
+        out_ownership[] = 0
         return string_to_c_string(err_response)
 
     var router = router_ptr.value()
     var url = bytes_to_string(url_ptr, Int(url_len))
-    var method = c_string_to_string(method_ptr)
-    var headers_str = bytes_to_string(headers_ptr, Int(headers_len))
-    var body = bytes_to_string(body_ptr, Int(body_len))
+    var method = bytes_to_string(method_ptr, Int(method_len))
 
     var request = HTTPRequest(url=url, method=method)
-    request.body = body
-    request._headers_raw = headers_str
-    request.multipart = _build_multipart(form_ptr, form_count, files_ptr, file_count)
+    if body_len > 0:
+        request.body = bytes_to_string(body_ptr, Int(body_len))
+    if headers_len > 0:
+        request._headers_ptr = Optional[C_UInt8](headers_ptr)
+        request._headers_len = Int(headers_len)
+    if form_count > 0 or file_count > 0:
+        request.multipart = _build_multipart(form_ptr, form_count, files_ptr, file_count)
 
     var router_response = router[].handle(request)
 
     var resp_body_len = router_response.body.byte_length()
-    var http_response = String(capacity_bytes=resp_body_len + 256)
-    http_response += "HTTP/1.1 "
-    http_response += String(router_response.status)
-    http_response += " " + get_status_phrase(router_response.status) + "\\r\\n"
-    var resp_content_type = _strip_crlf(router_response.content_type)
-    http_response += "Content-Type: " + resp_content_type + "\\r\\n"
-    http_response += "Content-Length: " + String(resp_body_len) + "\\r\\n"
-    http_response += "Connection: keep-alive\\r\\n"
+    var has_headers = len(router_response.headers) > 0
+    var has_cookies = len(router_response.cookies) > 0
 
-    for header_key in router_response.headers.keys():
-        if _has_crlf(header_key) or header_key.find(":") != -1:
-            continue
-        var val = _strip_crlf(router_response.headers.get(header_key, ""))
-        http_response += header_key + ": " + val + "\\r\\n"
-    for cookie in router_response.cookies:
-        if _has_crlf(cookie):
-            continue
-        http_response += "Set-Cookie: " + cookie + "\\r\\n"
-    http_response += "\\r\\n"
-    http_response += router_response.body
-    out_len[] = UInt64(http_response.byte_length())
-    var result = string_to_c_string(http_response)
-    return result
+    var est_len = 160 + router_response.content_type.byte_length() + resp_body_len
+    if has_headers:
+        for header_key in router_response.headers.keys():
+            est_len += header_key.byte_length() + router_response.headers.get(header_key, "").byte_length() + 4
+    if has_cookies:
+        for cookie in router_response.cookies:
+            est_len += 14 + cookie.byte_length()
+
+    var dst: C_UInt8
+    if UInt64(est_len) <= scratch_cap:
+        dst = scratch_ptr
+        out_ownership[] = 2
+    else:
+        dst = external_call["malloc", C_UInt8, UInt64](UInt64(est_len))
+        out_ownership[] = 0
+
+    var pos = 0
+    if router_response.status == 200:
+        _write_str(dst, pos, "HTTP/1.1 200 OK\\r\\nContent-Type: ")
+    else:
+        _write_str(dst, pos, "HTTP/1.1 ")
+        _write_uint(dst, pos, Int(router_response.status))
+        _write_str(dst, pos, " ")
+        _write_str(dst, pos, get_status_phrase(router_response.status))
+        _write_str(dst, pos, "\\r\\nContent-Type: ")
+
+    _write_str_no_crlf(dst, pos, router_response.content_type)
+    _write_str(dst, pos, "\\r\\nContent-Length: ")
+    _write_uint(dst, pos, resp_body_len)
+    if keep_alive != 0:
+        _write_str(dst, pos, "\\r\\nConnection: keep-alive\\r\\n")
+    else:
+        _write_str(dst, pos, "\\r\\nConnection: close\\r\\n")
+
+    if has_headers:
+        for header_key in router_response.headers.keys():
+            if _has_crlf(header_key) or header_key.find(":") != -1:
+                continue
+            _write_str(dst, pos, header_key)
+            _write_str(dst, pos, ": ")
+            _write_str_no_crlf(dst, pos, router_response.headers.get(header_key, ""))
+            _write_str(dst, pos, "\\r\\n")
+
+    if has_cookies:
+        for cookie in router_response.cookies:
+            if _has_crlf(cookie):
+                continue
+            _write_str(dst, pos, "Set-Cookie: ")
+            _write_str(dst, pos, cookie)
+            _write_str(dst, pos, "\\r\\n")
+
+    _write_str(dst, pos, "\\r\\n")
+    _write_span(dst, pos, router_response.body.as_bytes())
+
+    out_len[] = UInt64(pos)
+    return dst
 
 # ============================================================
 # HTTPServer
@@ -1279,3 +1375,4 @@ def main():
         print("📦 Run: ./build.sh")
     else:
         print("❌ Build failed!")
+
