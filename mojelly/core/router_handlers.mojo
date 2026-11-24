@@ -158,9 +158,7 @@ def match_compiled(
             )
             break
         if seg.is_param:
-            params[seg.name] = String(
-                StringSlice(unsafe_from_utf8=bytes[s:e])
-            )
+            params[seg.name] = String(StringSlice(unsafe_from_utf8=bytes[s:e]))
 
     return Optional[Dict[String, String]](params^)
 
