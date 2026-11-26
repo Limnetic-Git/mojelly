@@ -5,9 +5,9 @@ struct HTTPResponse:
     var headers: Dict[String, String]
     var cookies: List[String]
 
-    def __init__(out self, status: Int32 = 200, body: String = ""):
+    def __init__(out self, status: Int32 = 200, var body: String = ""):
         self.status = status
-        self.body = body
+        self.body = body^
         self.content_type = "text/plain"
         self.headers = Dict[String, String]()
         self.cookies = List[String]()

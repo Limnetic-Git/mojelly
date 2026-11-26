@@ -88,6 +88,14 @@ static _Thread_local int current_thread_id = -1;
 #define STATIC_HDR_MAX 512
 #define RESP_SCRATCH_SIZE 65536
 
+#define MOJELLY_METHOD_OTHER 0
+#define MOJELLY_METHOD_GET 1
+#define MOJELLY_METHOD_POST 2
+#define MOJELLY_METHOD_PUT 3
+#define MOJELLY_METHOD_DELETE 4
+#define MOJELLY_METHOD_PATCH 5
+#define MOJELLY_METHOD_HEAD 6
+
 static size_t g_max_header_size = 64UL << 10;
 static size_t g_max_body_size = 10UL << 20;
 static size_t g_max_file_size = 100UL << 20;
@@ -98,6 +106,23 @@ static long g_request_timeout_ms = 30 * 1000;
 static long g_shutdown_timeout_ms = 30 * 1000;
 
 static volatile sig_atomic_t g_shutdown = 0;
+
+/* RFC 7230 token characters (tchar) для валидации имён заголовков в fast-path
+ */
+static const uint8_t g_tchar[256] = {
+    ['!'] = 1, ['#'] = 1, ['$'] = 1, ['%'] = 1, ['&'] = 1, ['\''] = 1,
+    ['*'] = 1, ['+'] = 1, ['-'] = 1, ['.'] = 1, ['0'] = 1, ['1'] = 1,
+    ['2'] = 1, ['3'] = 1, ['4'] = 1, ['5'] = 1, ['6'] = 1, ['7'] = 1,
+    ['8'] = 1, ['9'] = 1, ['A'] = 1, ['B'] = 1, ['C'] = 1, ['D'] = 1,
+    ['E'] = 1, ['F'] = 1, ['G'] = 1, ['H'] = 1, ['I'] = 1, ['J'] = 1,
+    ['K'] = 1, ['L'] = 1, ['M'] = 1, ['N'] = 1, ['O'] = 1, ['P'] = 1,
+    ['Q'] = 1, ['R'] = 1, ['S'] = 1, ['T'] = 1, ['U'] = 1, ['V'] = 1,
+    ['W'] = 1, ['X'] = 1, ['Y'] = 1, ['Z'] = 1, ['^'] = 1, ['_'] = 1,
+    ['`'] = 1, ['a'] = 1, ['b'] = 1, ['c'] = 1, ['d'] = 1, ['e'] = 1,
+    ['f'] = 1, ['g'] = 1, ['h'] = 1, ['i'] = 1, ['j'] = 1, ['k'] = 1,
+    ['l'] = 1, ['m'] = 1, ['n'] = 1, ['o'] = 1, ['p'] = 1, ['q'] = 1,
+    ['r'] = 1, ['s'] = 1, ['t'] = 1, ['u'] = 1, ['v'] = 1, ['w'] = 1,
+    ['x'] = 1, ['y'] = 1, ['z'] = 1, ['|'] = 1, ['~'] = 1};
 
 /* ================= Static files config ================= */
 
@@ -237,7 +262,6 @@ static void freeze_upload_routes(void) {
 
 static _Thread_local char tl_resp_buf[RESP_SCRATCH_SIZE];
 
-/* 2.3: struct layouts must match Mojo structs exactly. */
 typedef struct {
   const char *name;
   const char *value;
@@ -256,10 +280,10 @@ extern char *mojo_handler(void *router, const char *url, const char *method,
                           const char *headers, const char *body,
                           size_t *out_len, int *out_ownership, size_t url_len,
                           size_t method_len, size_t headers_len,
-                          size_t body_len, int keep_alive, char *scratch_buf,
-                          size_t scratch_cap, c_form_field_t *form,
-                          size_t form_count, c_file_part_t *files,
-                          size_t file_count);
+                          size_t body_len, uint8_t method_id, int keep_alive,
+                          char *scratch_buf, size_t scratch_cap,
+                          c_form_field_t *form, size_t form_count,
+                          c_file_part_t *files, size_t file_count);
 
 static void *global_router = NULL;
 void mojelly_set_router(void *router) { global_router = router; }
@@ -500,6 +524,7 @@ typedef struct client_ctx {
   size_t ct_value_start;
   size_t ct_value_len;
   int in_content_type;
+  int llhttp_active;
   int keep_alive;
   int processing;
   void *router;
@@ -876,7 +901,8 @@ static const char *get_status_color(int status) {
 }
 
 static NOINLINE void log_request(const char *method, const char *url,
-                                 int status, double duration_ms) {
+                                 size_t url_len, int status,
+                                 double duration_ms) {
   const char *mc = get_method_color(method);
   const char *sc = get_status_color(status);
   static _Thread_local time_t cached_at = 0;
@@ -888,9 +914,9 @@ static NOINLINE void log_request(const char *method, const char *url,
     strftime(time_str, sizeof(time_str), "%H:%M:%S", &tm_info);
     cached_at = now;
   }
-  printf("[%s] [T%d] %s%s%s %s%s%s %s%d%s %.2fms\n", time_str,
-         current_thread_id, mc, method, COLOR_RESET, COLOR_BOLD, url,
-         COLOR_RESET, sc, status, COLOR_RESET, duration_ms);
+  printf("[%s] [T%d] %s%s%s %s%.*s%s %s%d%s %.2fms\n", time_str,
+         current_thread_id, mc, method, COLOR_RESET, COLOR_BOLD, (int)url_len,
+         url, COLOR_RESET, sc, status, COLOR_RESET, duration_ms);
 }
 
 /* ================= Conn list ================= */
@@ -932,15 +958,19 @@ static void execute_http_data(client_ctx_t *ctx, const char *data, size_t len);
 static inline void reset_request_state_inline(client_ctx_t *ctx) {
   idle_touch(ctx, uv_now(ctx->client.loop));
   ctx->request_started_ms = 0;
-  buf_reset_arena(&ctx->url);
-  buf_reset_arena(&ctx->headers);
-  buf_reset_arena(&ctx->body);
-  arena_reset(&ctx->arena);
+  if (UNLIKELY(ctx->arena.used != 0 || ctx->url.data != NULL ||
+               ctx->headers.data != NULL || ctx->body.data != NULL)) {
+    buf_reset_arena(&ctx->url);
+    buf_reset_arena(&ctx->headers);
+    buf_reset_arena(&ctx->body);
+    arena_reset(&ctx->arena);
+  }
   ctx->header_state = HEADER_STATE_NONE;
   ctx->hdr_field_start = 0;
   ctx->ct_value_start = 0;
   ctx->ct_value_len = 0;
   ctx->in_content_type = 0;
+  ctx->llhttp_active = 0;
   ctx->reject_status = 0;
   ctx->processing = 0;
   ctx->expect_files = 0;
@@ -1137,27 +1167,33 @@ static const char *get_mime_type(const char *path) {
   return "application/octet-stream";
 }
 
-static int open_static_file(const char *url, int *out_fd, struct stat *out_st,
-                            char *out_mime_path, size_t out_mime_sz) {
+static int open_static_file(const char *url, size_t url_len, int *out_fd,
+                            struct stat *out_st, char *out_mime_path,
+                            size_t out_mime_sz) {
   *out_fd = -1;
-  if (url == NULL)
+  if (url == NULL || url_len == 0)
     return 1;
 
   const char *rel = NULL;
+  size_t rem_len = 0;
   if (g_static.prefix_len == 1 && g_static.prefix[0] == '/') {
     if (url[0] != '/')
       return 1;
     rel = url + 1;
+    rem_len = url_len - 1;
   } else {
-    if (strncmp(url, g_static.prefix, g_static.prefix_len) != 0)
+    if (url_len <= g_static.prefix_len)
+      return 1;
+    if (memcmp(url, g_static.prefix, g_static.prefix_len) != 0)
       return 1;
     if (url[g_static.prefix_len] != '/')
       return 1;
     rel = url + g_static.prefix_len + 1;
+    rem_len = url_len - g_static.prefix_len - 1;
   }
 
   size_t rel_len = 0;
-  while (rel[rel_len] != '\0' && rel[rel_len] != '?' && rel[rel_len] != '#') {
+  while (rel_len < rem_len && rel[rel_len] != '?' && rel[rel_len] != '#') {
     rel_len++;
   }
   if (rel_len == 0)
@@ -1273,8 +1309,8 @@ static void static_cleanup_and_finish(client_ctx_t *ctx, int ok) {
     clock_gettime(CLOCK_MONOTONIC, &end_ts);
     double duration_ms = (end_ts.tv_sec - st->start_ts.tv_sec) * 1000.0 +
                          (end_ts.tv_nsec - st->start_ts.tv_nsec) / 1000000.0;
-    log_request("GET", ctx->url.data ? ctx->url.data : "", ok ? 200 : 500,
-                duration_ms);
+    log_request("GET", ctx->url.data ? ctx->url.data : "", ctx->url.len,
+                ok ? 200 : 500, duration_ms);
   }
 
   if (!uv_is_closing((uv_handle_t *)&ctx->client)) {
@@ -1407,17 +1443,19 @@ static void on_static_headers_written(uv_write_t *req, int status) {
 }
 
 static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
-                                     const char *method, const char *url) {
+                                     const char *method, const char *url,
+                                     size_t url_len) {
   int fd = -1;
   struct stat st_buf;
   char mime_path[PATH_MAX];
-  int rc = open_static_file(url, &fd, &st_buf, mime_path, sizeof(mime_path));
+  int rc = open_static_file(url, url_len, &fd, &st_buf, mime_path,
+                            sizeof(mime_path));
   if (rc == 1)
     return 0;
 
   if (rc == -2) {
     if (UNLIKELY(g_log_level >= 1))
-      log_request(method, url, 403, 0.0);
+      log_request(method, url, url_len, 403, 0.0);
     send_response(&ctx->client, http_403, sizeof(http_403) - 1, 0,
                   MOJO_RESP_BORROWED);
     return 1;
@@ -1427,7 +1465,7 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
     if (g_static.prefix_len == 1 && g_static.prefix[0] == '/')
       return 0;
     if (UNLIKELY(g_log_level >= 1))
-      log_request(method, url, 404, 0.0);
+      log_request(method, url, url_len, 404, 0.0);
     send_response(&ctx->client, http_404, sizeof(http_404) - 1, ctx->keep_alive,
                   MOJO_RESP_BORROWED);
     return 1;
@@ -1450,7 +1488,7 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
     if (hdr_len <= 0 || hdr_len >= STATIC_HDR_MAX) {
       close(fd);
       if (UNLIKELY(g_log_level >= 1))
-        log_request(method, url, 500, 0.0);
+        log_request(method, url, url_len, 500, 0.0);
       send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
                     MOJO_RESP_BORROWED);
       return 1;
@@ -1473,7 +1511,7 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
       if (got != want) {
         close(fd);
         if (UNLIKELY(g_log_level >= 1))
-          log_request(method, url, 500, 0.0);
+          log_request(method, url, url_len, 500, 0.0);
         send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
                       MOJO_RESP_BORROWED);
         return 1;
@@ -1483,7 +1521,7 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
     close(fd);
 
     if (UNLIKELY(g_log_level >= 1))
-      log_request(method, url, 200, 0.0);
+      log_request(method, url, url_len, 200, 0.0);
     send_response(&ctx->client, small_buf, total_len, keep_alive,
                   MOJO_RESP_SCRATCH);
     return 1;
@@ -1493,7 +1531,7 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
   if (uv_fileno((uv_handle_t *)&ctx->client, &sock_fd) != 0 || sock_fd < 0) {
     close(fd);
     if (UNLIKELY(g_log_level >= 1))
-      log_request(method, url, 500, 0.0);
+      log_request(method, url, url_len, 500, 0.0);
     send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
                   MOJO_RESP_BORROWED);
     return 1;
@@ -1511,7 +1549,7 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
   if (hdr_len <= 0 || hdr_len >= STATIC_HDR_MAX) {
     close(fd);
     if (UNLIKELY(g_log_level >= 1))
-      log_request(method, url, 500, 0.0);
+      log_request(method, url, url_len, 500, 0.0);
     send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
                   MOJO_RESP_BORROWED);
     return 1;
@@ -1522,7 +1560,7 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
   if (st == NULL) {
     close(fd);
     if (UNLIKELY(g_log_level >= 1))
-      log_request(method, url, 500, 0.0);
+      log_request(method, url, url_len, 500, 0.0);
     send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
                   MOJO_RESP_BORROWED);
     return 1;
@@ -1533,8 +1571,12 @@ static NOINLINE int try_serve_static(client_ctx_t *ctx, int is_head,
   st->offset = 0;
   st->file_size = file_size;
   st->keep_alive = keep_alive;
-  if (UNLIKELY(g_log_level >= 1))
+  if (UNLIKELY(g_log_level >= 1)) {
     clock_gettime(CLOCK_MONOTONIC, &st->start_ts);
+    if (ctx->url.data == NULL && url_len > 0) {
+      (void)buf_append_arena(&ctx->url, &ctx->arena, url, url_len);
+    }
+  }
 
 #ifdef TCP_CORK
   {
@@ -2021,10 +2063,264 @@ static char *extract_boundary(const char *content_type, size_t ct_len) {
   return boundary;
 }
 
+/* ================= Common request dispatch ================= */
+
+static inline uint8_t http_method_id(uint8_t m) {
+  switch (m) {
+  case HTTP_GET:
+    return MOJELLY_METHOD_GET;
+  case HTTP_POST:
+    return MOJELLY_METHOD_POST;
+  case HTTP_PUT:
+    return MOJELLY_METHOD_PUT;
+  case HTTP_DELETE:
+    return MOJELLY_METHOD_DELETE;
+  case HTTP_PATCH:
+    return MOJELLY_METHOD_PATCH;
+  case HTTP_HEAD:
+    return MOJELLY_METHOD_HEAD;
+  default:
+    return MOJELLY_METHOD_OTHER;
+  }
+}
+
+static inline size_t http_method_len(uint8_t m, const char *name) {
+  switch (m) {
+  case HTTP_GET:
+    return 3;
+  case HTTP_POST:
+    return 4;
+  case HTTP_PUT:
+    return 3;
+  case HTTP_DELETE:
+    return 6;
+  case HTTP_PATCH:
+    return 5;
+  case HTTP_HEAD:
+    return 4;
+  case HTTP_OPTIONS:
+    return 7;
+  default:
+    return strlen(name);
+  }
+}
+
+static NOINLINE char *
+call_mojo_with_multipart(void *router, client_ctx_t *ctx, uint8_t method_id,
+                         const char *url, size_t url_len, const char *method,
+                         size_t method_len, const char *headers,
+                         size_t headers_len, const char *body, size_t body_len,
+                         size_t *resp_len, int *resp_owned) {
+  int form_count = ctx->mp->form_count;
+  int file_count = ctx->mp->file_count;
+
+  c_form_field_t form_arr[100];
+  for (int i = 0; i < form_count; i++) {
+    form_arr[i].name = ctx->mp->form[i].name;
+    form_arr[i].value = ctx->mp->form[i].value;
+    form_arr[i].value_len = ctx->mp->form[i].value_len;
+  }
+  c_file_part_t file_arr[100];
+  for (int i = 0; i < file_count; i++) {
+    file_arr[i].name = ctx->mp->files[i].name;
+    file_arr[i].filename = ctx->mp->files[i].filename;
+    file_arr[i].content_type = ctx->mp->files[i].content_type;
+    file_arr[i].path = ctx->mp->files[i].path;
+    file_arr[i].size = ctx->mp->files[i].size;
+  }
+
+  return mojo_handler(router, url, method, headers, body, resp_len, resp_owned,
+                      url_len, method_len, headers_len, body_len, method_id,
+                      ctx->keep_alive, tl_resp_buf, RESP_SCRATCH_SIZE, form_arr,
+                      (size_t)form_count, file_arr, (size_t)file_count);
+}
+
+static inline void dispatch_http_request(client_ctx_t *ctx, uint8_t method_id,
+                                         const char *method, size_t method_len,
+                                         const char *url, size_t url_len,
+                                         const char *headers,
+                                         size_t headers_len, const char *body,
+                                         size_t body_len) {
+  if (UNLIKELY(__atomic_load_n(&g_static.enabled, __ATOMIC_RELAXED)) &&
+      (method_id == MOJELLY_METHOD_GET || method_id == MOJELLY_METHOD_HEAD)) {
+    if (try_serve_static(ctx, method_id == MOJELLY_METHOD_HEAD, method, url,
+                         url_len)) {
+      return;
+    }
+  }
+
+  void *router = ctx->router ? ctx->router : global_router;
+  if (UNLIKELY(router == NULL)) {
+    send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
+                  MOJO_RESP_BORROWED);
+    return;
+  }
+
+  struct timespec start, end;
+  int log_on = g_log_level >= 1;
+  if (UNLIKELY(log_on))
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+  size_t resp_len = 0;
+  int resp_owned = MOJO_RESP_OWNED;
+  char *response;
+  if (UNLIKELY(ctx->mp != NULL)) {
+    response = call_mojo_with_multipart(
+        router, ctx, method_id, url, url_len, method, method_len, headers,
+        headers_len, body, body_len, &resp_len, &resp_owned);
+  } else {
+    response = mojo_handler(router, url, method, headers, body, &resp_len,
+                            &resp_owned, url_len, method_len, headers_len,
+                            body_len, method_id, ctx->keep_alive, tl_resp_buf,
+                            RESP_SCRATCH_SIZE, NULL, 0, NULL, 0);
+  }
+
+  double duration_ms = 0.0;
+  if (UNLIKELY(log_on)) {
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
+                  (end.tv_nsec - start.tv_nsec) / 1000000.0;
+  }
+
+  int keep_alive = ctx->keep_alive;
+  if (LIKELY(response != NULL)) {
+    if (resp_len == 0)
+      resp_len = strlen(response);
+    if (UNLIKELY(log_on)) {
+      int status = extract_status_from_response(response, resp_len);
+      log_request(method, url, url_len, status, duration_ms);
+    }
+    send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
+  } else {
+    if (UNLIKELY(log_on))
+      log_request(method, url, url_len, 500, duration_ms);
+    send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
+                  MOJO_RESP_BORROWED);
+  }
+}
+
+/* ================= Zero-copy fast-path GET HTTP/1.1 parser =================
+ */
+
+typedef struct {
+  const char *url;
+  size_t url_len;
+  const char *headers;
+  size_t headers_len;
+  size_t consumed;
+  int keep_alive;
+} fast_req_t;
+
+/* Возвращает 1 при валидном полном GET HTTP/1.1 без тела прямо внутри буфера.
+ * При любом сомнении / неполноте / ошибке возвращает 0 — запрос уходит в
+ * llhttp. */
+static inline int try_fast_get(const char *data, size_t len, fast_req_t *out) {
+  if (len < 18 || memcmp(data, "GET ", 4) != 0)
+    return 0;
+
+  const char *end = data + len;
+  const char *url = data + 4;
+  if (UNLIKELY(*url != '/'))
+    return 0;
+
+  const char *p = url + 1;
+  while (p < end && (unsigned char)*p > 0x20 && (unsigned char)*p < 0x7F) {
+    p++;
+  }
+  size_t url_len = (size_t)(p - url);
+  if (UNLIKELY((size_t)(end - p) < 13 || memcmp(p, " HTTP/1.1\r\n", 11) != 0)) {
+    return 0;
+  }
+  p += 11;
+
+  const char *headers = p;
+  int keep_alive = 1;
+
+  for (;;) {
+    if (UNLIKELY(p + 2 > end))
+      return 0;
+    if (p[0] == '\r' && p[1] == '\n') {
+      size_t headers_len = (size_t)(p - headers);
+      if (UNLIKELY(url_len + headers_len > g_max_header_size))
+        return 0;
+      out->url = url;
+      out->url_len = url_len;
+      out->headers = headers;
+      out->headers_len = headers_len;
+      out->consumed = (size_t)((p + 2) - data);
+      out->keep_alive = keep_alive;
+      return 1;
+    }
+
+    const char *name_start = p;
+    while (p < end && g_tchar[(unsigned char)*p])
+      p++;
+    size_t name_len = (size_t)(p - name_start);
+    if (UNLIKELY(name_len == 0 || p >= end || *p != ':'))
+      return 0;
+    p++;
+
+    const char *val_start = p;
+    while (p < end && *p != '\r') {
+      unsigned char ch = (unsigned char)*p;
+      if (UNLIKELY(ch < 0x20 && ch != '\t'))
+        return 0;
+      p++;
+    }
+    if (UNLIKELY(p + 2 > end || p[1] != '\n'))
+      return 0;
+    size_t val_len = (size_t)(p - val_start);
+
+    unsigned char c0 = (unsigned char)name_start[0] | 0x20;
+    if (UNLIKELY(c0 == 'c')) {
+      if (name_len == 14 &&
+          strncasecmp(name_start, "Content-Length", 14) == 0) {
+        return 0;
+      }
+      if (name_len == 10 && strncasecmp(name_start, "Connection", 10) == 0) {
+        const char *v = val_start;
+        size_t vl = val_len;
+        while (vl > 0 && (*v == ' ' || *v == '\t')) {
+          v++;
+          vl--;
+        }
+        while (vl > 0 && (v[vl - 1] == ' ' || v[vl - 1] == '\t'))
+          vl--;
+        if (vl == 5 && strncasecmp(v, "close", 5) == 0) {
+          keep_alive = 0;
+        } else if (!(vl == 10 && strncasecmp(v, "keep-alive", 10) == 0)) {
+          return 0;
+        }
+      } else if (name_len == 12 &&
+                 strncasecmp(name_start, "Content-Type", 12) == 0) {
+        const char *v = val_start;
+        size_t vl = val_len;
+        while (vl > 0 && (*v == ' ' || *v == '\t')) {
+          v++;
+          vl--;
+        }
+        if (vl >= 19 && strncasecmp(v, "multipart/form-data", 19) == 0) {
+          return 0;
+        }
+      }
+    } else if (UNLIKELY(c0 == 't' && name_len == 17 &&
+                        strncasecmp(name_start, "Transfer-Encoding", 17) ==
+                            0)) {
+      return 0;
+    } else if (UNLIKELY(c0 == 'e' && name_len == 6 &&
+                        strncasecmp(name_start, "Expect", 6) == 0)) {
+      return 0;
+    }
+
+    p += 2;
+  }
+}
+
 /* ================= llhttp callbacks ================= */
 
 static int on_message_begin_c(llhttp_t *parser) {
   client_ctx_t *ctx = (client_ctx_t *)parser->data;
+  ctx->llhttp_active = 1;
   ctx->reject_status = 0;
   ctx->expect_files = 0;
   ctx->keep_alive = 1;
@@ -2202,56 +2498,6 @@ static int on_body_c(llhttp_t *parser, const char *at, size_t length) {
   return buf_append_arena(&ctx->body, &ctx->arena, at, length);
 }
 
-static inline size_t http_method_len(uint8_t m, const char *name) {
-  switch (m) {
-  case HTTP_GET:
-    return 3;
-  case HTTP_POST:
-    return 4;
-  case HTTP_PUT:
-    return 3;
-  case HTTP_DELETE:
-    return 6;
-  case HTTP_PATCH:
-    return 5;
-  case HTTP_HEAD:
-    return 4;
-  case HTTP_OPTIONS:
-    return 7;
-  default:
-    return strlen(name);
-  }
-}
-
-static NOINLINE char *
-call_mojo_with_multipart(void *router, client_ctx_t *ctx, const char *url,
-                         const char *method, size_t method_len,
-                         const char *headers, const char *body,
-                         size_t *resp_len, int *resp_owned) {
-  int form_count = ctx->mp->form_count;
-  int file_count = ctx->mp->file_count;
-
-  c_form_field_t form_arr[100];
-  for (int i = 0; i < form_count; i++) {
-    form_arr[i].name = ctx->mp->form[i].name;
-    form_arr[i].value = ctx->mp->form[i].value;
-    form_arr[i].value_len = ctx->mp->form[i].value_len;
-  }
-  c_file_part_t file_arr[100];
-  for (int i = 0; i < file_count; i++) {
-    file_arr[i].name = ctx->mp->files[i].name;
-    file_arr[i].filename = ctx->mp->files[i].filename;
-    file_arr[i].content_type = ctx->mp->files[i].content_type;
-    file_arr[i].path = ctx->mp->files[i].path;
-    file_arr[i].size = ctx->mp->files[i].size;
-  }
-
-  return mojo_handler(router, url, method, headers, body, resp_len, resp_owned,
-                      ctx->url.len, method_len, ctx->headers.len, ctx->body.len,
-                      ctx->keep_alive, tl_resp_buf, RESP_SCRATCH_SIZE, form_arr,
-                      (size_t)form_count, file_arr, (size_t)file_count);
-}
-
 static int on_message_complete_c(llhttp_t *parser) {
   client_ctx_t *ctx = (client_ctx_t *)parser->data;
 
@@ -2262,68 +2508,13 @@ static int on_message_complete_c(llhttp_t *parser) {
   }
 
   const char *method = llhttp_method_name((llhttp_method_t)parser->method);
-  const char *url = ctx->url.data ? ctx->url.data : "";
-
-  if (UNLIKELY(__atomic_load_n(&g_static.enabled, __ATOMIC_RELAXED)) &&
-      (parser->method == HTTP_GET || parser->method == HTTP_HEAD)) {
-    if (try_serve_static(ctx, parser->method == HTTP_HEAD, method, url)) {
-      return (ctx->processing || uv_is_closing((uv_handle_t *)&ctx->client))
-                 ? HPE_PAUSED
-                 : 0;
-    }
-  }
-
-  void *router = ctx->router ? ctx->router : global_router;
-  if (UNLIKELY(router == NULL)) {
-    send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
-                  MOJO_RESP_BORROWED);
-    return HPE_PAUSED;
-  }
-
-  const char *headers = ctx->headers.data ? ctx->headers.data : "";
-  const char *body = ctx->body.data ? ctx->body.data : "";
+  uint8_t method_id = http_method_id(parser->method);
   size_t method_len = http_method_len(parser->method, method);
 
-  struct timespec start, end;
-  int log_on = g_log_level >= 1;
-  if (UNLIKELY(log_on))
-    clock_gettime(CLOCK_MONOTONIC, &start);
-
-  size_t resp_len = 0;
-  int resp_owned = MOJO_RESP_OWNED;
-  char *response;
-  if (UNLIKELY(ctx->mp != NULL)) {
-    response = call_mojo_with_multipart(router, ctx, url, method, method_len,
-                                        headers, body, &resp_len, &resp_owned);
-  } else {
-    response = mojo_handler(router, url, method, headers, body, &resp_len,
-                            &resp_owned, ctx->url.len, method_len,
-                            ctx->headers.len, ctx->body.len, ctx->keep_alive,
-                            tl_resp_buf, RESP_SCRATCH_SIZE, NULL, 0, NULL, 0);
-  }
-
-  double duration_ms = 0.0;
-  if (UNLIKELY(log_on)) {
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    duration_ms = (end.tv_sec - start.tv_sec) * 1000.0 +
-                  (end.tv_nsec - start.tv_nsec) / 1000000.0;
-  }
-
-  int keep_alive = ctx->keep_alive;
-  if (LIKELY(response != NULL)) {
-    if (resp_len == 0)
-      resp_len = strlen(response);
-    if (UNLIKELY(log_on)) {
-      int status = extract_status_from_response(response, resp_len);
-      log_request(method, url, status, duration_ms);
-    }
-    send_response(&ctx->client, response, resp_len, keep_alive, resp_owned);
-  } else {
-    if (UNLIKELY(log_on))
-      log_request(method, url, 500, duration_ms);
-    send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
-                  MOJO_RESP_BORROWED);
-  }
+  dispatch_http_request(
+      ctx, method_id, method, method_len, ctx->url.data ? ctx->url.data : "",
+      ctx->url.len, ctx->headers.data ? ctx->headers.data : "",
+      ctx->headers.len, ctx->body.data ? ctx->body.data : "", ctx->body.len);
 
   return (ctx->processing || uv_is_closing((uv_handle_t *)&ctx->client))
              ? HPE_PAUSED
@@ -2359,21 +2550,64 @@ static NOINLINE void send_parse_error(client_ctx_t *ctx) {
 }
 
 static void execute_http_data(client_ctx_t *ctx, const char *data, size_t len) {
-  enum llhttp_errno err = llhttp_execute(&ctx->parser, data, len);
+  size_t pos = 0;
+
+  /* Zero-copy fast-path для полных GET HTTP/1.1 запросов (включая pipelining)
+   */
+  while (LIKELY(!ctx->llhttp_active && !ctx->processing &&
+                !uv_is_closing((uv_handle_t *)&ctx->client) && pos < len)) {
+    fast_req_t freq;
+    if (!try_fast_get(data + pos, len - pos, &freq)) {
+      break;
+    }
+    pos += freq.consumed;
+    ctx->keep_alive = freq.keep_alive;
+    dispatch_http_request(ctx, MOJELLY_METHOD_GET, "GET", 3, freq.url,
+                          freq.url_len, freq.headers, freq.headers_len, "", 0);
+    if (UNLIKELY(!freq.keep_alive)) {
+      return;
+    }
+  }
+
+  if (LIKELY(pos >= len || uv_is_closing((uv_handle_t *)&ctx->client))) {
+    return;
+  }
+
+  if (UNLIKELY(ctx->processing)) {
+    size_t rem = len - pos;
+    if (ctx->pending.len + rem > g_max_header_size + g_max_body_size) {
+      ctx->reject_status = 413;
+      send_parse_error(ctx);
+      return;
+    }
+    if (buf_append_arena(&ctx->pending, NULL, data + pos, rem) != 0) {
+      uv_read_stop((uv_stream_t *)&ctx->client);
+      send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
+                    MOJO_RESP_BORROWED);
+    }
+    return;
+  }
+
+  /* Fallback на полноценный llhttp
+   * (POST/PUT/chunked/фрагментация/HTTP 1.0/ошибки) */
+  ctx->llhttp_active = 1;
+  const char *ll_data = data + pos;
+  size_t ll_len = len - pos;
+  enum llhttp_errno err = llhttp_execute(&ctx->parser, ll_data, ll_len);
   if (LIKELY(err == HPE_OK))
     return;
 
   if (err == HPE_PAUSED) {
     if (ctx->processing && !uv_is_closing((uv_handle_t *)&ctx->client)) {
-      const char *pos = llhttp_get_error_pos(&ctx->parser);
-      if (pos != NULL && pos >= data && pos < data + len) {
-        size_t rem = (size_t)((data + len) - pos);
+      const char *err_pos = llhttp_get_error_pos(&ctx->parser);
+      if (err_pos != NULL && err_pos >= ll_data && err_pos < ll_data + ll_len) {
+        size_t rem = (size_t)((ll_data + ll_len) - err_pos);
         if (ctx->pending.len + rem > g_max_header_size + g_max_body_size) {
           ctx->reject_status = 413;
           send_parse_error(ctx);
           return;
         }
-        if (buf_append_arena(&ctx->pending, NULL, pos, rem) != 0) {
+        if (buf_append_arena(&ctx->pending, NULL, err_pos, rem) != 0) {
           uv_read_stop((uv_stream_t *)&ctx->client);
           send_response(&ctx->client, http_500, sizeof(http_500) - 1, 0,
                         MOJO_RESP_BORROWED);
@@ -2534,6 +2768,7 @@ static void on_connection_c(uv_stream_t *server, int status) {
   ctx->pending.arena_backed = 0;
 
   ctx->header_state = HEADER_STATE_NONE;
+  ctx->llhttp_active = 0;
   ctx->processing = 0;
   ctx->last_active_ms = uv_now(server->loop);
   ctx->expect_files = 0;

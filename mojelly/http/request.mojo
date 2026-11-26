@@ -168,7 +168,112 @@ struct HTTPRequest:
         self.params = Dict[String, String]()
         self.multipart = None
 
-    # ---- Headers (lazy, zero-copy from C arena until first access) ----
+    @always_inline
+    def __init__(
+        out self,
+        *,
+        url_ptr: Pointer[UInt8, MutUntrackedOrigin],
+        url_len: Int,
+        path_len: Int,
+        method_id: UInt8,
+        method_ptr: Pointer[UInt8, MutUntrackedOrigin],
+        method_len: Int,
+        headers_ptr: Pointer[UInt8, MutUntrackedOrigin],
+        headers_len: Int,
+        body_ptr: Pointer[UInt8, MutUntrackedOrigin],
+        body_len: Int,
+    ):
+        if url_len > 0:
+            self.url = String(
+                StringSlice(
+                    unsafe_from_utf8=Span[UInt8](
+                        unsafe_ptr=url_ptr, length=url_len
+                    )
+                )
+            )
+            if path_len < url_len:
+                self.path = String(
+                    StringSlice(
+                        unsafe_from_utf8=Span[UInt8](
+                            unsafe_ptr=url_ptr, length=path_len
+                        )
+                    )
+                )
+                var q_start = path_len + 1
+                var q_len = url_len - q_start
+                if q_len > 0:
+                    self.query_string = String(
+                        StringSlice(
+                            unsafe_from_utf8=Span[UInt8](
+                                unsafe_ptr=url_ptr.unsafe_offset(q_start),
+                                length=q_len,
+                            )
+                        )
+                    )
+                    self.query = QueryParams(self.query_string)
+                else:
+                    self.query_string = ""
+                    self.query = QueryParams()
+            else:
+                self.path = self.url
+                self.query_string = ""
+                self.query = QueryParams()
+        else:
+            self.url = ""
+            self.path = ""
+            self.query_string = ""
+            self.query = QueryParams()
+
+        if method_id == 1:
+            self.method = "GET"
+        elif method_id == 2:
+            self.method = "POST"
+        elif method_id == 3:
+            self.method = "PUT"
+        elif method_id == 4:
+            self.method = "DELETE"
+        elif method_id == 5:
+            self.method = "PATCH"
+        elif method_id == 6:
+            self.method = "HEAD"
+        elif method_len > 0:
+            self.method = String(
+                StringSlice(
+                    unsafe_from_utf8=Span[UInt8](
+                        unsafe_ptr=method_ptr, length=method_len
+                    )
+                )
+            )
+        else:
+            self.method = ""
+
+        if body_len > 0:
+            self.body = String(
+                StringSlice(
+                    unsafe_from_utf8=Span[UInt8](
+                        unsafe_ptr=body_ptr, length=body_len
+                    )
+                )
+            )
+        else:
+            self.body = ""
+
+        self._headers_raw = ""
+        if headers_len > 0:
+            self._headers_ptr = Optional[Pointer[UInt8, MutUntrackedOrigin]](
+                headers_ptr
+            )
+            self._headers_len = headers_len
+        else:
+            self._headers_ptr = None
+            self._headers_len = 0
+
+        self._headers_cache = None
+        self._cookies_cache = None
+        self.params = Dict[String, String]()
+        self.multipart = None
+
+    # ---- Headers (lazy, zero-copy from C buffer until first access) ----
 
     def get_header(mut self, name: String) -> String:
         self._ensure_headers()
