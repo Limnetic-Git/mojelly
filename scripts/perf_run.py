@@ -138,6 +138,8 @@ def main():
     ap.add_argument("--duration", type=int, default=10, help="measured seconds per run")
     ap.add_argument("--warmup", type=int, default=3)
     ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--server-cpus", default="", help="taskset list for server (default: first CPU)")
+    ap.add_argument("--client-cpus", default="", help="taskset list for oha (default: remaining CPUs)")
     ap.add_argument("--scenarios", default="", help="comma-separated names (default: all)")
     args = ap.parse_args()
 
@@ -150,10 +152,13 @@ def main():
 
     scenarios = [s for s in SCENARIOS if not args.scenarios or s[0] in args.scenarios.split(",")]
     cpus = sorted(os.sched_getaffinity(0))
-    if len(cpus) >= 4:
-        half = len(cpus) // 2
-        server_cpus = ",".join(map(str, cpus[:half]))
-        client_cpus = ",".join(map(str, cpus[half:]))
+    if args.server_cpus or args.client_cpus:
+        server_cpus, client_cpus = args.server_cpus, args.client_cpus
+    elif len(cpus) >= 3:
+        server_cpus = str(cpus[0])
+        client_cpus = ",".join(map(str, cpus[1:]))
+    elif len(cpus) == 2:
+        server_cpus, client_cpus = str(cpus[0]), str(cpus[1])
     else:
         server_cpus = client_cpus = ""
 
