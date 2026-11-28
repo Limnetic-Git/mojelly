@@ -3,7 +3,7 @@
 set -e
 
 USE_PIXI=true
-MOJO_VERSION="1.1.0"
+MOJO_VERSION="1.2.0"
 SHOW_WARNINGS=false
 
 run_mojo() {
@@ -45,8 +45,8 @@ channels = [
 platforms = ["linux-64"]
 
 [dependencies]
-mojo = "==1.1.0"
-emberjson = ">=0.3.0"
+mojo = "==1.2.0"
+emberjson = { git = "https://github.com/bgreni/EmberJson.git", tag = "0.5.0" }
 
 [tasks]
 build = "bash build.sh"
@@ -77,13 +77,20 @@ echo "🔍 Checking C core..."
 
 mkdir -p lib
 
+CC="${CC:-gcc}"
+ARCH_FLAGS="${MOJELLY_ARCH_FLAGS:--march=native -mtune=native}"
+COMMON_CFLAGS="-O3 $ARCH_FLAGS -pipe -fPIC -ftls-model=initial-exec -fno-plt -pthread"
+
 NEED_REBUILD=false
 
 if [ ! -f "lib/libmojelly.a" ]; then
     echo "📦 libmojelly.a not found, building..."
     NEED_REBUILD=true
+elif [ "build.sh" -nt "lib/libmojelly.a" ]; then
+    echo "📦 build.sh changed, rebuilding C core..."
+    NEED_REBUILD=true
 else
-    for src in src_c/*.c; do
+    for src in src_c/*.c src_c/*.h; do
         if [ -f "$src" ] && [ "$src" -nt "lib/libmojelly.a" ]; then
             echo "📦 $src changed, rebuilding..."
             NEED_REBUILD=true
@@ -93,37 +100,32 @@ else
 fi
 
 if [ "$NEED_REBUILD" = true ]; then
-    echo "🔨 Building C core with -O3..."
+    echo "🔨 Building C core with $CC ($COMMON_CFLAGS)..."
 
     cd src_c
 
-    # Compile main bridge
-    gcc -c bridge.c -o bridge.o \
+    "$CC" -c bridge.c -o bridge.o \
         -I/usr/include \
         -I/usr/include/llhttp \
         -I/usr/local/include \
         -I/usr/local/include/llhttp \
-        -fPIC -pthread \
-        -O3 -march=native -mtune=native -pipe \
-        -funroll-loops -ffast-math
+        $COMMON_CFLAGS
     echo "✅ bridge.o built"
 
     if [ -f "multipart_parser.c" ]; then
-        gcc -c multipart_parser.c -o multipart_parser.o \
+        "$CC" -c multipart_parser.c -o multipart_parser.o \
             -I/usr/include \
-            -fPIC -pthread \
-            -O3 -march=native -mtune=native -pipe \
-            -funroll-loops -ffast-math
+            $COMMON_CFLAGS
         echo "✅ multipart_parser.o built"
     else
         echo "⚠️ multipart_parser.c not found, streaming multipart disabled"
     fi
 
-    gcc -c bridge_ssl.c -O3 -o bridge_ssl.o \
+    "$CC" -c bridge_ssl.c -o bridge_ssl.o \
         -I/usr/include \
         -I/usr/include/openssl \
         -I/usr/local/include \
-        -fPIC \
+        $COMMON_CFLAGS \
         2>/dev/null || echo "⚠️ bridge_ssl.c not found or failed to compile"
 
     OBJ_FILES="bridge.o"
@@ -133,6 +135,8 @@ if [ "$NEED_REBUILD" = true ]; then
     if [ -f "bridge_ssl.o" ]; then
         OBJ_FILES="$OBJ_FILES bridge_ssl.o"
     fi
+
+    rm -f ../lib/libmojelly.a
     ar rcs ../lib/libmojelly.a $OBJ_FILES
     rm -f bridge.o multipart_parser.o bridge_ssl.o 2>/dev/null
     cd ..

@@ -785,6 +785,115 @@ def generate_dto_wrappers_code(
     return code
 
 
+def _is_dynamic_route(path: String) -> Bool:
+    var bytes = path.as_bytes()
+    var n = len(bytes)
+    var i = 0
+    while i < n:
+        if bytes[i] == 47:  # '/'
+            i += 1
+            continue
+        if bytes[i] == 58 or bytes[i] == 42:  # ':' or '*'
+            return True
+        while i < n and bytes[i] != 47:
+            i += 1
+    return False
+
+
+def generate_dispatch_code(
+    routes: Dict[String, String], handler_dtos: Dict[String, String]
+) -> String:
+    var method_names = List[String]()
+    method_names.append("GET")
+    method_names.append("POST")
+    method_names.append("PUT")
+    method_names.append("DELETE")
+    method_names.append("PATCH")
+
+    var method_ids = List[Int]()
+    method_ids.append(1)
+    method_ids.append(2)
+    method_ids.append(3)
+    method_ids.append(4)
+    method_ids.append(5)
+
+    var code = "@always_inline\n"
+    code += "def __mojelly_dispatch(\n"
+    code += "    router: Pointer[RouterHandlers, MutUntrackedOrigin],\n"
+    code += "    method_id: UInt8,\n"
+    code += "    url_ptr: C_UInt8,\n"
+    code += "    path_len: Int,\n"
+    code += "    mut request: HTTPRequest,\n"
+    code += ") -> HTTPResponse:\n"
+
+    var any_method = False
+    for m_idx in range(len(method_names)):
+        var target_method = method_names[m_idx]
+        var target_id = method_ids[m_idx]
+
+        var m_paths = List[String]()
+        var m_handlers = List[String]()
+        var lengths = List[Int]()
+
+        for orig_key in routes.keys():
+            var key = orig_key
+            if key.startswith("UPLOAD:"):
+                var stripped = String(key[byte = 7 : len(key.as_bytes())])
+                key = stripped^
+            var colon = key.find(":")
+            if colon == -1:
+                continue
+            var method = String(key[byte=0:colon])
+            if method != target_method:
+                continue
+            var path = String(key[byte = colon + 1 : len(key.as_bytes())])
+            if _is_dynamic_route(path):
+                continue
+            var handler = routes.get(orig_key, "")
+            if handler == "":
+                continue
+            var registered_handler = handler
+            if handler_dtos.get(handler, "") != "":
+                registered_handler = generated_dto_wrapper_name(handler)
+
+            m_paths.append(path)
+            m_handlers.append(registered_handler)
+
+            var plen = len(path.as_bytes())
+            var seen = False
+            for li in range(len(lengths)):
+                if lengths[li] == plen:
+                    seen = True
+                    break
+            if not seen:
+                lengths.append(plen)
+
+        if len(lengths) == 0:
+            continue
+
+        var kw = "    elif " if any_method else "    if "
+        any_method = True
+        code += kw + "method_id == " + String(target_id) + ":\n"
+
+        for l_idx in range(len(lengths)):
+            var plen = lengths[l_idx]
+            var lkw = "        elif " if l_idx > 0 else "        if "
+            code += lkw + "path_len == " + String(plen) + ":\n"
+            for r_idx in range(len(m_paths)):
+                if len(m_paths[r_idx].as_bytes()) == plen:
+                    code += (
+                        '            if _bytes_eq(url_ptr, "'
+                        + m_paths[r_idx]
+                        + '"):\n'
+                        + "                return "
+                        + m_handlers[r_idx]
+                        + "(request)\n"
+                    )
+
+    code += "    return router[].handle(request)\n"
+    return code
+
+
 def generate_routes_code(
     routes: Dict[String, String], handler_dtos: Dict[String, String]
 ) -> String:
@@ -905,6 +1014,7 @@ def generate_server(user_file: String) -> Optional[String]:
             print("⚠️ Error resolving DTO for", handler, ":", e)
 
     var dto_wrappers_code = generate_dto_wrappers_code(routes, handler_dtos)
+    var dispatch_code = generate_dispatch_code(routes, handler_dtos)
     var routes_code = generate_routes_code(routes, handler_dtos)
     routes_code += generate_static_code(static_mounts)
     var json_import = String()
@@ -964,10 +1074,10 @@ ROUTES_PLACEHOLDER
 # ============================================================
 
 from mojelly.http.request import HTTPRequest, MultipartData, FilePart
-from mojelly.http.response import HTTPResponse, get_status_phrase, _has_crlf, _strip_crlf
+from mojelly.http.response import HTTPResponse, get_status_phrase, _has_crlf
 JSON_IMPORT_PLACEHOLDER
 from mojelly.core.router_handlers import RouterHandlers
-from std.memory import Pointer
+from std.memory import Pointer, unsafe_memcpy
 from std.memory.alloc import alloc, dealloc, Layout, ThinAllocation
 from std.ffi import external_call
 from std.time import sleep
@@ -1084,12 +1194,90 @@ def bytes_to_string(ptr: C_UInt8, len: Int) -> String:
 
 def string_to_c_string(s: String) -> C_UInt8:
     var bytes = s.as_bytes()
-    var len = len(bytes)
-    var ptr = external_call["malloc", C_UInt8, UInt64](UInt64(len + 1))
-    _ = external_call["memcpy", C_UInt8, C_UInt8, C_UInt8, UInt64](ptr, bytes.unsafe_ptr().unsafe_mut_cast[True]().unsafe_origin_cast[MutUntrackedOrigin](), UInt64(len))
-    ptr.unsafe_offset(len).unsafe_write(0)
+    var n = len(bytes)
+    var ptr = external_call["malloc", C_UInt8, UInt64](UInt64(n + 1))
+    if n > 0:
+        unsafe_memcpy(dest=ptr, src=bytes.unsafe_ptr(), count=n)
+    ptr.unsafe_offset(n).unsafe_write(0)
     return ptr
 
+@always_inline
+def _find_query_pos(ptr: C_UInt8, length: Int) -> Int:
+    for i in range(length):
+        if ptr.unsafe_offset(i)[] == 63:  # '?'
+            return i
+    return length
+
+@always_inline
+def _bytes_eq(ptr: C_UInt8, lit: StaticString) -> Bool:
+    var b = lit.as_bytes()
+    var n = len(b)
+    for i in range(n):
+        if ptr.unsafe_offset(i)[] != b[i]:
+            return False
+    return True
+
+@always_inline
+def _write_span(dst: C_UInt8, mut pos: Int, bytes: Span[UInt8, _]):
+    var n = len(bytes)
+    if n == 0:
+        return
+    unsafe_memcpy(
+        dest=dst.unsafe_offset(pos),
+        src=bytes.unsafe_ptr(),
+        count=n,
+    )
+    pos += n
+
+@always_inline
+def _write_lit(dst: C_UInt8, mut pos: Int, s: StaticString):
+    _write_span(dst, pos, s.as_bytes())
+
+@always_inline
+def _write_str(dst: C_UInt8, mut pos: Int, s: String):
+    _write_span(dst, pos, s.as_bytes())
+
+def _write_str_no_crlf(dst: C_UInt8, mut pos: Int, s: String):
+    if not _has_crlf(s):
+        _write_span(dst, pos, s.as_bytes())
+        return
+    var bytes = s.as_bytes()
+    for i in range(len(bytes)):
+        var b = bytes[i]
+        if b != 13 and b != 10:
+            dst.unsafe_offset(pos).unsafe_write(b)
+            pos += 1
+
+@always_inline
+def _write_uint(dst: C_UInt8, mut pos: Int, value: Int):
+    if value == 0:
+        dst.unsafe_offset(pos).unsafe_write(UInt8(48))
+        pos += 1
+        return
+    var v = value
+    if v < 0:
+        dst.unsafe_offset(pos).unsafe_write(UInt8(45))
+        pos += 1
+        v = -v
+    var start = pos
+    while v > 0:
+        dst.unsafe_offset(pos).unsafe_write(UInt8(48 + (v % 10)))
+        pos += 1
+        v //= 10
+    var l = start
+    var r = pos - 1
+    while l < r:
+        var tmp = dst.unsafe_offset(l)[]
+        dst.unsafe_offset(l).unsafe_write(dst.unsafe_offset(r)[])
+        dst.unsafe_offset(r).unsafe_write(tmp)
+        l += 1
+        r -= 1
+
+# ============================================================
+# COMPILE-TIME ROUTE DISPATCH
+# ============================================================
+
+DISPATCH_PLACEHOLDER
 # ============================================================
 # MULTIPART (FFI-array, no JSON)
 # ============================================================
@@ -1136,57 +1324,133 @@ def mojo_handler(
     out_len: Pointer[UInt64, MutUntrackedOrigin],
     out_ownership: Pointer[Int32, MutUntrackedOrigin],
     url_len: UInt64,
+    method_len: UInt64,
     headers_len: UInt64,
     body_len: UInt64,
+    method_id: UInt8,
+    keep_alive: Int32,
+    scratch_ptr: C_UInt8,
+    scratch_cap: UInt64,
     form_ptr: Pointer[CFormField, MutUntrackedOrigin],
     form_count: UInt64,
     files_ptr: Pointer[CFilePart, MutUntrackedOrigin],
     file_count: UInt64
 ) abi("C") -> C_UInt8:
-    out_ownership[] = 0
-
     if not router_ptr:
-        var err_response = "HTTP/1.1 500 Internal Server Error\\r\\n\\r\\n"
-        out_len[] = UInt64(err_response.byte_length())
-        return string_to_c_string(err_response)
+        var err_lit: StaticString = "HTTP/1.1 500 Internal Server Error\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n"
+        var err_len = len(err_lit.as_bytes())
+        out_len[] = UInt64(err_len)
+        if UInt64(err_len) <= scratch_cap:
+            var pos = 0
+            _write_lit(scratch_ptr, pos, err_lit)
+            out_ownership[] = 2
+            return scratch_ptr
+        out_ownership[] = 0
+        return string_to_c_string(String(err_lit))
 
     var router = router_ptr.value()
-    var url = bytes_to_string(url_ptr, Int(url_len))
-    var method = c_string_to_string(method_ptr)
-    var headers_str = bytes_to_string(headers_ptr, Int(headers_len))
-    var body = bytes_to_string(body_ptr, Int(body_len))
+    var ulen = Int(url_len)
+    var path_len = _find_query_pos(url_ptr, ulen)
 
-    var request = HTTPRequest(url=url, method=method)
-    request.body = body
-    request._headers_raw = headers_str
-    request.multipart = _build_multipart(form_ptr, form_count, files_ptr, file_count)
+    var request = HTTPRequest(
+        url_ptr=url_ptr,
+        url_len=ulen,
+        path_len=path_len,
+        method_id=method_id,
+        method_ptr=method_ptr,
+        method_len=Int(method_len),
+        headers_ptr=headers_ptr,
+        headers_len=Int(headers_len),
+        body_ptr=body_ptr,
+        body_len=Int(body_len),
+    )
+    if form_count > 0 or file_count > 0:
+        request.multipart = _build_multipart(form_ptr, form_count, files_ptr, file_count)
 
-    var router_response = router[].handle(request)
+    var router_response = __mojelly_dispatch(router, method_id, url_ptr, path_len, request)
 
     var resp_body_len = router_response.body.byte_length()
-    var http_response = String(capacity_bytes=resp_body_len + 256)
-    http_response += "HTTP/1.1 "
-    http_response += String(router_response.status)
-    http_response += " " + get_status_phrase(router_response.status) + "\\r\\n"
-    var resp_content_type = _strip_crlf(router_response.content_type)
-    http_response += "Content-Type: " + resp_content_type + "\\r\\n"
-    http_response += "Content-Length: " + String(resp_body_len) + "\\r\\n"
-    http_response += "Connection: keep-alive\\r\\n"
+    var has_headers = len(router_response.headers) > 0
+    var has_cookies = len(router_response.cookies) > 0
 
-    for header_key in router_response.headers.keys():
-        if _has_crlf(header_key) or header_key.find(":") != -1:
-            continue
-        var val = _strip_crlf(router_response.headers.get(header_key, ""))
-        http_response += header_key + ": " + val + "\\r\\n"
-    for cookie in router_response.cookies:
-        if _has_crlf(cookie):
-            continue
-        http_response += "Set-Cookie: " + cookie + "\\r\\n"
-    http_response += "\\r\\n"
-    http_response += router_response.body
-    out_len[] = UInt64(http_response.byte_length())
-    var result = string_to_c_string(http_response)
-    return result
+    var est_len = 160 + router_response.content_type.byte_length() + resp_body_len
+    if has_headers:
+        for header_key in router_response.headers.keys():
+            est_len += header_key.byte_length() + router_response.headers.get(header_key, "").byte_length() + 4
+    if has_cookies:
+        for cookie in router_response.cookies:
+            est_len += 14 + cookie.byte_length()
+
+    var dst: C_UInt8
+    if UInt64(est_len) <= scratch_cap:
+        dst = scratch_ptr
+        out_ownership[] = 2
+    else:
+        dst = external_call["malloc", C_UInt8, UInt64](UInt64(est_len))
+        out_ownership[] = 0
+
+    var pos = 0
+    if router_response.status == 200:
+        ref ct = router_response.content_type
+        if ct == "application/json":
+            _write_lit(dst, pos, "HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: ")
+        elif ct == "text/plain":
+            _write_lit(dst, pos, "HTTP/1.1 200 OK\\r\\nContent-Type: text/plain\\r\\nContent-Length: ")
+        elif ct == "text/html":
+            _write_lit(dst, pos, "HTTP/1.1 200 OK\\r\\nContent-Type: text/html\\r\\nContent-Length: ")
+        elif ct == "text/css":
+            _write_lit(dst, pos, "HTTP/1.1 200 OK\\r\\nContent-Type: text/css\\r\\nContent-Length: ")
+        elif ct == "application/javascript":
+            _write_lit(dst, pos, "HTTP/1.1 200 OK\\r\\nContent-Type: application/javascript\\r\\nContent-Length: ")
+        else:
+            _write_lit(dst, pos, "HTTP/1.1 200 OK\\r\\nContent-Type: ")
+            _write_str_no_crlf(dst, pos, ct)
+            _write_lit(dst, pos, "\\r\\nContent-Length: ")
+    else:
+        _write_lit(dst, pos, "HTTP/1.1 ")
+        _write_uint(dst, pos, Int(router_response.status))
+        _write_lit(dst, pos, " ")
+        _write_str(dst, pos, get_status_phrase(router_response.status))
+        _write_lit(dst, pos, "\\r\\nContent-Type: ")
+        _write_str_no_crlf(dst, pos, router_response.content_type)
+        _write_lit(dst, pos, "\\r\\nContent-Length: ")
+
+    _write_uint(dst, pos, resp_body_len)
+
+    if not has_headers and not has_cookies:
+        if keep_alive != 0:
+            _write_lit(dst, pos, "\\r\\nConnection: keep-alive\\r\\n\\r\\n")
+        else:
+            _write_lit(dst, pos, "\\r\\nConnection: close\\r\\n\\r\\n")
+    else:
+        if keep_alive != 0:
+            _write_lit(dst, pos, "\\r\\nConnection: keep-alive\\r\\n")
+        else:
+            _write_lit(dst, pos, "\\r\\nConnection: close\\r\\n")
+
+        if has_headers:
+            for header_key in router_response.headers.keys():
+                if _has_crlf(header_key) or header_key.find(":") != -1:
+                    continue
+                _write_str(dst, pos, header_key)
+                _write_lit(dst, pos, ": ")
+                _write_str_no_crlf(dst, pos, router_response.headers.get(header_key, ""))
+                _write_lit(dst, pos, "\\r\\n")
+
+        if has_cookies:
+            for cookie in router_response.cookies:
+                if _has_crlf(cookie):
+                    continue
+                _write_lit(dst, pos, "Set-Cookie: ")
+                _write_str(dst, pos, cookie)
+                _write_lit(dst, pos, "\\r\\n")
+
+        _write_lit(dst, pos, "\\r\\n")
+
+    _write_span(dst, pos, router_response.body.as_bytes())
+
+    out_len[] = UInt64(pos)
+    return dst
 
 # ============================================================
 # HTTPServer
@@ -1245,6 +1509,7 @@ struct HTTPServer:
     )
     template = template.replace("JSON_IMPORT_PLACEHOLDER", json_import)
     template = template.replace("DTO_WRAPPERS_PLACEHOLDER", dto_wrappers_code)
+    template = template.replace("DISPATCH_PLACEHOLDER", dispatch_code)
     template = template.replace("ROUTES_PLACEHOLDER", routes_code)
     return Optional[String](template)
 
